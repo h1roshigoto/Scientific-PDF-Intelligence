@@ -180,6 +180,46 @@ def test_invalid_evidence_never_leaves_partial_export(tmp_path, submission):
         validate_submission(schema, submission, publication_ids=["D001", "D002"])
 
 
+@pytest.mark.parametrize("submission", ["rag"], indirect=True)
+@pytest.mark.parametrize(("fragment", "table", "figure"), [(None, "Table 1", None), (" \n", None, "Fig. 1")])
+def test_rag_extracted_requires_fragment_with_table_or_figure(submission, fragment, table, figure):
+    submission.tables["results"][0].update(
+        source_fragment=fragment, source_table=table, source_figure=figure
+    )
+    with pytest.raises(SubmissionError, match="RAG extracted result requires source_fragment"):
+        validate_submission(load_schema("rag"), submission, publication_ids=["D001", "D002"])
+
+
+@pytest.mark.parametrize("submission", ["solar"], indirect=True)
+def test_solar_rejects_device_from_a_different_measurement(submission):
+    submission.tables["results"][0]["device_id"] = "d2"
+    submission.tables["measurements"][0]["device_id"] = "d1"
+    with pytest.raises(SubmissionError, match="device_id='d2'.*measurement_id='e1'"):
+        validate_submission(load_schema("solar"), submission, publication_ids=["D001", "D002"])
+
+
+@pytest.mark.parametrize("submission", ["solar"], indirect=True)
+@pytest.mark.parametrize(
+    ("device_id", "measurement_id", "measurement_devices"),
+    [("d2", "e1", "d1; d2"), (None, "e1", "d1"), ("d2", None, "d1"), ("d2", "e1", None)],
+)
+def test_solar_allows_matching_or_unspecified_measurement_link(
+    submission, device_id, measurement_id, measurement_devices
+):
+    submission.tables["results"][0].update(
+        device_id=device_id, measurement_id=measurement_id, source_fragment=None
+    )
+    submission.tables["measurements"][0]["device_id"] = measurement_devices
+    validate_submission(load_schema("solar"), submission, publication_ids=["D001", "D002"])
+
+
+@pytest.mark.parametrize("status", ["needs_review", "verified"])
+def test_csv_requires_explicit_submission_status(submission, status):
+    submission.tables["results"][0]["extraction_status"] = status
+    with pytest.raises(SubmissionError, match=f"invalid extraction_status.*{status}"):
+        validate_submission(load_schema(submission.domain), submission, publication_ids=["D001", "D002"])
+
+
 def test_result_duplicate_cycle(submission):
     result = submission.tables["results"][0]
     result["duplicate_of"] = result["result_id"]

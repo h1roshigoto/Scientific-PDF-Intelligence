@@ -176,6 +176,11 @@ def _require_number(value, kind, location):
         raise SubmissionError(f"{location} must be nonnegative")
 
 
+def _reference_ids(value, *, many):
+    values = value.split(";") if many else [value]
+    return filter(None, map(str.strip, values))
+
+
 def _validate_relations(schema, tables, indexes, publications):
     for pid, row in publications.items():
         if row["in_scope"] not in {"true", "false"}:
@@ -194,9 +199,7 @@ def _validate_relations(schema, tables, indexes, publications):
             if publications[pid]["in_scope"] == "false" and name not in schema.excluded_tables:
                 raise SubmissionError(f"{location}: dependent row for excluded publication {pid!r}")
             for reference in table.references:
-                value = row[reference.column]
-                values = value.split(";") if reference.many else [value]
-                for target_id in filter(None, map(str.strip, values)):
+                for target_id in _reference_ids(row[reference.column], many=reference.many):
                     if (pid, target_id) not in indexes[reference.target]:
                         raise SubmissionError(
                             f"{location}: {reference.column}={target_id!r} does not exist "
@@ -206,7 +209,22 @@ def _validate_relations(schema, tables, indexes, publications):
                 raise SubmissionError(f"{location}: source_fragment requires source_page")
             if name == "results":
                 _validate_result(schema, row, location)
+                if schema.domain == "solar":
+                    _validate_solar_measurement_device(row, indexes["measurements"], location)
     _validate_duplicate_chains(indexes["results"])
+
+
+def _validate_solar_measurement_device(row, measurements, location):
+    device_id = row["device_id"].strip()
+    measurement_id = row["measurement_id"].strip()
+    if not device_id or not measurement_id:
+        return
+    measurement = measurements[(row["publication_id"], measurement_id)]
+    devices = set(_reference_ids(measurement["device_id"], many=True))
+    if devices and device_id not in devices:
+        raise SubmissionError(
+            f"{location}: device_id={device_id!r} is not listed for measurement_id={measurement_id!r}"
+        )
 
 
 def _validate_duplicate_chains(index):
@@ -235,7 +253,11 @@ def _validate_result(schema, row, location):
     if row.get("extraction_status") == "extracted":
         if not row.get("raw_value", "").strip() or not row.get("source_page"):
             raise SubmissionError(f"{location}: extracted result requires raw_value and source_page")
-        if not any(row[column].strip() for column in ("source_fragment", "source_table", "source_figure")):
+        has_fragment = bool(row["source_fragment"].strip())
+        if schema.domain == "rag":
+            if not has_fragment:
+                raise SubmissionError(f"{location}: RAG extracted result requires source_fragment")
+        elif not (has_fragment or row["source_table"].strip() or row["source_figure"].strip()):
             raise SubmissionError(f"{location}: extracted result requires a source locator")
     if schema.domain == "rag" and row["normalized_value"]:
         if row["metric_value"] and Decimal(row["metric_value"]) != Decimal(row["normalized_value"]):
