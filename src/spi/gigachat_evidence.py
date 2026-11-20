@@ -186,11 +186,12 @@ def _table_source(page: pymupdf.Page, lookup: Lookup) -> Source:
     return Source(page.number + 1, (*captions, *headers, *row), row[column])
 
 
-def prepare_source(path: Path, page_number: int, lookup: Lookup) -> Source:
+def prepare_source(path: Path, page_number: int, lookup: Lookup, *, content: bytes | None = None) -> Source:
     if not path.is_file():
         raise EvidenceError("pdf_missing")
     try:
-        with pymupdf.open(path) as pdf:
+        pdf = pymupdf.open(path) if content is None else pymupdf.open(stream=content, filetype="pdf")
+        with pdf:
             if not pdf.is_pdf or pdf.needs_pass:
                 raise EvidenceError("pdf_unreadable")
             if not 1 <= page_number <= len(pdf):

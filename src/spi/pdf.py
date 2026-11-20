@@ -1,19 +1,21 @@
 """Extract PDF text blocks with coordinates; mark image-only pages for OCR."""
 from hashlib import sha256
 from pathlib import Path
-import fitz
+import pymupdf
 from .storage import Store
 
 
-def import_pdf(store: Store, path, domain: str):
+def import_pdf(store: Store, path, domain: str, *, content: bytes | None = None):
     if domain not in ("solar", "rag"):
         raise ValueError("Domain must be solar or rag")
     path = Path(path).resolve()
     if not path.is_file() or path.suffix.lower() != ".pdf":
         raise ValueError("Expected an existing PDF")
+    if content is None:
+        content = path.read_bytes()
     document_id = f"{domain}:{path.stem}"
     pages = []
-    with fitz.open(path) as document:
+    with pymupdf.open(stream=content, filetype="pdf") as document:
         for index, page in enumerate(document):
             blocks = [
                 {"text": block[4].strip(), "bbox": [round(float(x), 2) for x in block[:4]]}
@@ -27,12 +29,11 @@ def import_pdf(store: Store, path, domain: str):
     record = {
         "document_id": document_id, "publication_id": path.stem,
         "domain": domain, "filename": path.name, "file_path": str(path),
-        "sha256": sha256(path.read_bytes()).hexdigest(),
+        "sha256": sha256(content).hexdigest(),
         "parser_version": "pymupdf-1",
         "page_count": len(pages),
         "pages_needing_ocr": [p["page"] for p in pages if p["ocr_status"] == "pending"],
         "processing_status": "parsed_text",
     }
-    store.upsert("documents.json", record, "document_id")
-    store.write(f"{domain}_{path.stem}_pages.json", pages)
+    store.save_document(record, pages)
     return record
