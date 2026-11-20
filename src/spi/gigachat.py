@@ -105,11 +105,16 @@ def _retry_delay(response: httpx.Response, retries: int) -> float:
 
 
 def _is_tls_error(error: Exception) -> bool:
-    cause: BaseException | None = error
-    while cause is not None:
+    pending: list[BaseException] = [error]
+    seen: set[BaseException] = set()
+    while pending:
+        cause = pending.pop()
         if isinstance(cause, ssl.SSLError):
             return True
-        cause = cause.__cause__
+        if cause in seen:
+            continue
+        seen.add(cause)
+        pending.extend(link for link in (cause.__cause__, cause.__context__) if link is not None)
     return False
 
 

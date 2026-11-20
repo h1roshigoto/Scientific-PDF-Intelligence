@@ -1,5 +1,6 @@
 import json
 import logging
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from urllib.parse import parse_qs
@@ -155,6 +156,24 @@ def test_missing_credentials(monkeypatch):
     monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
     with pytest.raises(GigaChatError, match="missing_credentials"):
         GigaChatClient(transport=httpx.MockTransport(lambda _: pytest.fail("sent request")))
+
+
+def test_tls_error_wrapped_by_transport_is_not_retried(monkeypatch):
+    def handle(request):
+        try:
+            try:
+                raise ssl.SSLCertVerificationError("untrusted certificate")
+            except ssl.SSLCertVerificationError:
+                raise OSError("TLS handshake failed")
+        except OSError as exc:
+            raise httpx.ConnectError("connection failed", request=request) from exc
+
+    monkeypatch.setattr(gigachat.time, "sleep", lambda _: pytest.fail("retried a TLS error"))
+    with GigaChatClient(SETTINGS, transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(GigaChatError) as exc:
+            client.list_models()
+    assert exc.value.stage == "oauth"
+    assert exc.value.code == "tls_error"
 
 
 @pytest.mark.parametrize("multiplier", [1, 1000])
