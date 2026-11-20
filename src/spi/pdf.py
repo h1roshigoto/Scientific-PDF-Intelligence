@@ -18,10 +18,14 @@ def parse_pdf(path, domain: str, *, content: bytes | None = None, inspect_page=N
     with pymupdf.open(stream=content, filetype="pdf") as document:
         if document.needs_pass or not document.is_pdf or not len(document):
             raise ValueError("PDF is encrypted, empty or not readable")
+        object_count = document.xref_length()
         for index in range(len(document)):
             item = {"page": index + 1, "blocks": [], "ocr_status": "unknown"}
             try:
                 page = document[index]
+                # MuPDF can load a blank placeholder for a broken page-tree entry.
+                if not 0 < page.xref < object_count or document.xref_get_key(page.xref, "Type") != ("name", "/Page"):
+                    raise ValueError("Invalid PDF page reference")
                 blocks = [
                     {"text": block[4].strip(), "bbox": [round(float(x), 2) for x in block[:4]]}
                     for block in page.get_text("blocks", sort=True)
@@ -46,7 +50,7 @@ def parse_pdf(path, domain: str, *, content: bytes | None = None, inspect_page=N
         "document_id": document_id, "publication_id": path.stem,
         "domain": domain, "filename": path.name, "file_path": str(path),
         "sha256": sha256(content).hexdigest(),
-        "parser_version": "pymupdf-1",
+        "parser_version": "pymupdf-2",
         "page_count": len(pages),
         "pages_needing_ocr": [p["page"] for p in pages if p["ocr_status"] == "pending"],
         "processing_status": "partial" if any(p["read_status"] in ("error", "ocr_required")
