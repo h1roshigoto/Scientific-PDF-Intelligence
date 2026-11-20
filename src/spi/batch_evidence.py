@@ -150,7 +150,14 @@ def _table_context(cell, fragment, domain):
         })
         if result.get("architecture") not in {"n-i-p", "p-i-n", "substrate", "superstrate"}:
             result.pop("architecture", None)
-        result["device_label"] = row
+        axis = fold(cell.row_axis.text) if cell.row_axis else ""
+        if axis in {"direction", "scan direction", "sweep direction"}:
+            result["raw_scan_direction"] = row
+            champion = re.search(r"\bchampion devices?\b.{0,80}?\bbased on (.{1,120}?)\.?$", caption, re.I | re.S)
+            if champion:
+                result.update(device_label=champion[1].strip(), device_role="record", aggregation="champion")
+        else:
+            result["device_label"] = row
         if cell.aggregation:
             result["aggregation"] = cell.aggregation
         direction = re.findall(r"\b(reverse|forward|average)\s+(?:J.?V\s+)?(?:scan|sweep)", " ".join([caption, *headers, row]), re.I)
@@ -313,6 +320,8 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             raise EvidenceError("wrong_table_value_or_unit")
         context.update(_table_context(cell, fragment, domain))
         geometry = [*cell.row, *cell.headers, source_block]
+        if cell.row_axis:
+            geometry.append(cell.row_axis)
         if fragment.caption:
             geometry.extend(fragment.caption_support or (fragment.caption,))
         if spread:
@@ -349,6 +358,8 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         errors.append("origin_unresolved")
     if fragment.cells and domain == "rag" and not {"rag_variant", "generator_model", "dataset_name"} <= context.keys():
         errors.append("rag_context_unresolved")
+    if fragment.cells and domain == "solar" and "device_label" not in context:
+        errors.append("solar_device_unresolved")
     try:
         normalized = normalize(proposal.raw_value, proposal.raw_unit, name, domain)
     except EvidenceError as exc:

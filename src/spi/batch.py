@@ -215,6 +215,12 @@ def _process(store, path, domain, generation, previous):
         ]
         record["supplement"] = {"status": "mentioned_not_provided" if supplementary else "not_detected_in_read_pages",
                                 "evidence": list({(s["page"], s["quote"]): s for s in supplementary}.values())}
+        if domain == "solar":
+            record["measurement_notes"] = [
+                {"page": page["page"], "fragment": block["text"][:1250], "bbox": block["bbox"]}
+                for page in pages for block in page["blocks"]
+                if re.search(r"\b(?:solar simulator|source meter|source.measure unit)\b", block["text"], re.I)
+            ]
         record["planned_fragments"] = len(fragments)
         decision = _scope(store, record)
         record["scope_status_at_run"] = decision["status"]

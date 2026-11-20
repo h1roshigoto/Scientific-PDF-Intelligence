@@ -96,6 +96,9 @@ def project_submission(
         pid = doc["publication_id"]
         source = result.source
         notes = [result.note, result.context.get("note")]
+        raw_scan = result.context.get("raw_scan_direction")
+        if raw_scan:
+            notes.append(f"Published scan direction: {raw_scan}")
         if schema.domain == "rag" and source.column:
             notes.append(f"Table header path: {source.column}")
         if result.context.get("metric_definition"):

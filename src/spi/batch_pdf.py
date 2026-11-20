@@ -14,7 +14,7 @@ from .gigachat_evidence import Block, _NUMBER
 CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)\s*(?:[.:|–—]|$)", re.I)
 CELL = re.compile(rf"({_NUMBER})(?:\s*(±\s*{_NUMBER}))?(?:\s*(%|[A-Za-zµμΩΩ][\wµμ²^/ ()⁻−-]*))?")
 RECORD = re.compile(rf"\(({_NUMBER})\)")
-LAYOUT_VERSION = f"batch-layout-6/pymupdf-{pymupdf.VersionBind}"
+LAYOUT_VERSION = f"batch-layout-7/pymupdf-{pymupdf.VersionBind}"
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ class Cell:
     row: tuple[Block, ...]
     headers: tuple[Block, ...]
     aggregation: str | None = None
+    row_axis: Block | None = None
 
 
 @dataclass(frozen=True)
@@ -41,7 +42,8 @@ class Fragment:
             "blocks": [asdict(block) for block in self.blocks],
             "table_cells": [
                 {"cell": cell.value.block_id, "row": [b.block_id for b in cell.row],
-                 "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation}
+                 "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation,
+                 "row_axis": cell.row_axis.block_id if cell.row_axis else None}
                 for cell in self.cells
             ],
         }
@@ -126,7 +128,7 @@ def _ruled(page, caption, tables):
                     break
                 headers.append(matches[0])
             if len(headers) == start:
-                cells.append(Cell(value, (row[0],), tuple(dict.fromkeys(headers))))
+                cells.append(Cell(value, (row[0],), tuple(dict.fromkeys(headers)), row_axis=rows[start - 1][0]))
     return cells
 
 
@@ -178,6 +180,7 @@ def _borderless(caption, lines):
     first_band, first_y, _, columns = grid[0]
     levels = []
     leaf_candidates = []
+    row_axis = None
     pitch = median(b - a for a, b in zip(columns, columns[1:]))
     for y, row in reversed(bands[:first_band]):
         if first_y - y > (34 if not levels else 23):
@@ -193,6 +196,8 @@ def _borderless(caption, lines):
             abs(center(label) - x) <= min(pitch * .43, 8) for label, x in zip(labels, columns)
         ):
             leaf_candidates = labels
+            extra = [b for b in row if b not in labels]
+            row_axis = extra[0] if len(extra) == 1 else None
             levels.append(labels)
             first_y = y
         elif levels:
@@ -214,7 +219,7 @@ def _borderless(caption, lines):
             if len(intermediate) == 1 and center(intermediate[0]) > columns[0] + pitch:
                 group = intermediate[0]
         row_path = (group, row[0]) if group else (row[0],)
-        cells.extend(Cell(cell, row_path, tuple(level[j] for level in levels))
+        cells.extend(Cell(cell, row_path, tuple(level[j] for level in levels), row_axis=row_axis)
                      for j, cell in enumerate(row[1:]))
         prior_band = row_band
     return cells
@@ -381,6 +386,8 @@ def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=Non
                 source = list(support)
                 for cell in subset:
                     source.extend((*cell.row, *cell.headers, cell.value))
+                    if cell.row_axis:
+                        source.append(cell.row_axis)
                 fragments.append(Fragment(subset[0].value.block_id, page.number + 1,
                                           tuple(dict.fromkeys(source)), subset,
                                           caption, location, support))

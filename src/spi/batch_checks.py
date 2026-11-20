@@ -46,14 +46,15 @@ def validate_results(results):
     for result in results:
         context = result.context
         if result.domain == "solar":
-            identity = (context.get("device_label"), context.get("scan_direction"),
+            identity = (context.get("device_label"), context.get("scan_direction"), context.get("raw_scan_direction"),
                         context.get("measurement_type"), context.get("spectrum"),
                         context.get("light_intensity"), context.get("aggregation"),
                         context.get("temperature"), context.get("stress_conditions"))
             if result.extraction_status == "verified" and result.source.origin == "primary":
                 pce_sets[(*identity, result.source.page, result.source.table, result.source.row)].append(result)
                 if context.get("device_label") and context.get("aggregation") == "champion":
-                    solar_sources[(context["device_label"], result.metric.name)].append(result)
+                    solar_sources[(context["device_label"], result.metric.name, context.get("scan_direction"),
+                                   context.get("raw_scan_direction"))].append(result)
         else:
             identity = tuple(context.get(field) for field in (
                 "rag_variant", "dataset_name", "generator_model", "retriever_model",

@@ -130,6 +130,24 @@ def test_verifier_requires_exact_quote_row_column_and_known_unit():
         check(p1.model_copy(update={"headers": ["col2"]}))
 
 
+def test_rag_metric_k_is_distinct_from_retrieval_top_k():
+    def block(key, value):
+        return Block(key, (0, 0, 1, 1), value)
+
+    caption = block("caption", "Table 3. Our evaluation\nDataset: Benchmark\nGenerator: Model\nRetrieval top-k: 20")
+    row = block("row", "Method")
+    header = block("col", "Recall@5 (%)")
+    value = block("cell", "72")
+    cell = Cell(value, (row,), (header,))
+    fragment = Fragment("table", 2, (caption, row, header, value), (cell,), caption, "Table 3")
+    (proposal,) = offline_proposals(fragment, "rag")
+    result, errors = verify(proposal, fragment, "rag", "rag:D101", "b"*64, "local")
+    assert not errors
+    assert result.metric.k == 5
+    assert result.context["top_k"] == "20"
+    assert result.normalized.unit == "%"
+
+
 @pytest.mark.parametrize(("pce", "pin", "comparable", "status"), [
     ("18.4", "100", True, "pass"), ("19.5", "100", True, "fail"),
     ("18.4", None, True, "not_evaluable"), ("18.4", "100", False, "not_evaluable"),
