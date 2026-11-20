@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from .batch_checks import validate_results
 from .batch_evidence import (
-    MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, make_prompt, model_fragments,
+    MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, TableValueMismatch, make_prompt, model_fragments,
     offline_proposals, relevant, verify,
 )
 from .batch_pdf import LAYOUT_VERSION, page_fragments
@@ -157,7 +157,7 @@ class Generation:
                 event["requested_max_tokens"] = self.completion_max_tokens
             event["elapsed_ms"] = round((perf_counter() - started) * 1000, 2)
 
-        results, issues = {}, []
+        results, issues, review_details = {}, [], []
         for proposal in proposals:
             try:
                 result, errors = verify(proposal, fragment, domain, record["document_id"], record["sha256"], model)
@@ -165,6 +165,9 @@ class Generation:
                 results[result.result_id] = result.model_dump(mode="json")
                 event["verified_quotes"] += 1
                 event["verified_context_links"] += int(result.extraction_status == "verified")
+            except TableValueMismatch as exc:
+                issues.append(str(exc))
+                review_details.append({"code": str(exc), "source_block_id": proposal.block, "fields": exc.fields})
             except EvidenceError as exc:
                 issues.append(str(exc))
         if self.complete is None:
@@ -173,10 +176,13 @@ class Generation:
                 issues.append("unsupported_table_metrics_or_number_format")
         if completion is not None and not event["cache_hit"] and not issues:
             store.write(cache_file, completion.model_dump(mode="json"))
-        return {"status": "review" if issues else "done", "page": fragment.page,
-                "location": fragment.location, "results": list(results.values()),
-                "issues": list(dict.fromkeys(issues)),
-                "review_source": fragment.payload() if issues else None}
+        outcome = {"status": "review" if issues else "done", "page": fragment.page,
+                   "location": fragment.location, "results": list(results.values()),
+                   "issues": list(dict.fromkeys(issues)),
+                   "review_source": fragment.payload() if issues else None}
+        if review_details:
+            outcome["review_details"] = review_details
+        return outcome
 
 
 def _checkpoint(store, record):
@@ -208,7 +214,7 @@ def _plan_model_fragments(fragments, saved):
     return planned
 
 
-def _process(store, path, domain, generation, previous):
+def _process(store, path, domain, generation, previous, *, prioritize_cell=None):
     pid = f"{domain}:{path.stem}"
     record = {"document_id": pid, "path": str(path), "domain": domain,
               "status": "running", "sha256": None, "page_count": None, "pages": [],
@@ -221,7 +227,7 @@ def _process(store, path, domain, generation, previous):
         if previous and previous.get("revision") == revision:
             record = {**previous, "path": str(path)}
             plan_is_current = mode == "local" or record.get("model_plan_version") == MODEL_PLAN_VERSION
-            if plan_is_current and record["status"] in {"processed", "partial"} and not any(
+            if not prioritize_cell and plan_is_current and record["status"] in {"processed", "partial"} and not any(
                 unit["status"] == "pending" for unit in record["fragments"].values()
             ) and not record.get("retry_parse") and not record.get("pending_units") and (
                 record.get("scope_status_at_run") == _scope(store, record)["status"]
@@ -273,6 +279,12 @@ def _process(store, path, domain, generation, previous):
             return
         # Prioritize proven table geometry before optional prose.
         fragments.sort(key=lambda fragment: (not bool(fragment.cells), fragment.page, fragment.id))
+        if prioritize_cell:
+            matches = [f for f in fragments if f.cells and f.cells[0].value.block_id == prioritize_cell]
+            if len(matches) != 1:
+                raise ValueError("The requested source block must match exactly one table cell")
+            fragments.remove(matches[0])
+            fragments.insert(0, matches[0])
         _checkpoint(store, record)
         for fragment in fragments:
             old = record["fragments"].get(fragment.id)
@@ -313,7 +325,9 @@ def _process(store, path, domain, generation, previous):
 
 
 def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False,
-              completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS):
+              completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS, prioritize_cell=None):
+    if prioritize_cell and (local_only or len(paths) != 1):
+        raise ValueError("Prioritizing a source cell requires a model batch of exactly one PDF")
     with ExitStack() as stack:
         try:
             stack.enter_context(store.batch_lock())
@@ -339,5 +353,6 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
             if pid not in prior:
                 _checkpoint(store, {"document_id": pid, "path": str(path), "domain": domain, "status": "pending"})
         for path in paths:
-            _process(store, path, domain, generation, prior.get(f"{domain}:{path.stem}"))
+            _process(store, path, domain, generation, prior.get(f"{domain}:{path.stem}"),
+                     prioritize_cell=prioritize_cell)
         return report(store, domain, selected, requests=generation.events)

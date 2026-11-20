@@ -21,6 +21,7 @@ def main(argv=None):
     parser.add_argument("--publication-id", action="append", default=[])
     parser.add_argument("--limit", type=int, help="Maximum selected PDFs")
     parser.add_argument("--max-requests", type=int, help="Maximum new model calls in this invocation")
+    parser.add_argument("--prioritize-cell", help="Process a table cell by source block ID before other cells")
     parser.add_argument(
         "--completion-max-tokens", type=int,
         help=f"Maximum output tokens per GigaChat batch request (default: {DEFAULT_COMPLETION_MAX_TOKENS})",
@@ -40,6 +41,9 @@ def main(argv=None):
             parser.error(f"--completion-max-tokens must be between 1 and {MAX_COMPLETION_MAX_TOKENS}")
         if not args.batch or args.dry_run or args.local_only:
             parser.error("--completion-max-tokens requires a model batch (--batch)")
+    if args.prioritize_cell is not None and (not args.batch or args.dry_run or args.local_only
+                                              or not args.prioritize_cell.strip()):
+        parser.error("--prioritize-cell requires a source block ID and a model batch (--batch)")
     if args.batch or args.dry_run or args.manifest:
         try:
             state = Path(args.state)
@@ -52,6 +56,7 @@ def main(argv=None):
                 else:
                     payload = run_batch(Store(state), paths, args.domain, local_only=args.local_only,
                                         max_requests=args.max_requests, json_only=args.json_only,
+                                        prioritize_cell=args.prioritize_cell,
                                         completion_max_tokens=args.completion_max_tokens or DEFAULT_COMPLETION_MAX_TOKENS)
             body = json.dumps(payload, ensure_ascii=True, indent=2)
             if args.report:
