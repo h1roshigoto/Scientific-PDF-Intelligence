@@ -14,7 +14,7 @@ from .gigachat_evidence import Block, _NUMBER
 CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)\s*(?:[.:|–—]|$)", re.I)
 CELL = re.compile(rf"({_NUMBER})(?:\s*(±\s*{_NUMBER}))?(?:\s*(%|[A-Za-zµμΩΩ][\wµμ²^/ ()⁻−-]*))?")
 RECORD = re.compile(rf"\(({_NUMBER})\)")
-LAYOUT_VERSION = f"batch-layout-7/pymupdf-{pymupdf.VersionBind}"
+LAYOUT_VERSION = f"batch-layout-8/pymupdf-{pymupdf.VersionBind}"
 
 
 @dataclass(frozen=True)
