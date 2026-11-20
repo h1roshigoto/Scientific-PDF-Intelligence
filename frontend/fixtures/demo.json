@@ -1,4 +1,5 @@
 {
+  "passport_snapshot": { "run_id": "demo", "generated_at": "2026-11-20T17:40:00Z" },
   "documents": [
     { "document_id": "solar:D001", "domain": "solar", "title": "Демо · Тонкоплёночный солнечный элемент", "page_count": 5 },
     { "document_id": "solar:D006", "domain": "solar", "title": "Демо · Тандем вне области кейса", "page_count": 2 },

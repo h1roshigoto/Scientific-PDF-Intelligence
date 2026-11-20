@@ -5,3 +5,4 @@ test-results/
 .env.*
 !.env.example
 !public/demo/*.pdf
+!public/demo/passports/*.pdf

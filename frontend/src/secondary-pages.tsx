@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage } from './data';
 import { csvFiles, domainName, publicationId, sourceLabel } from './domain';
 import type { Domain, Issue, Result } from './domain';
+import { saveFile } from './download';
 import { documentSourceUrl, Link, navigate, resultUrl, sectionUrl } from './navigation';
 import { provider } from './provider';
+import { ProjectPassportPanel } from './passport-export';
 import { checkLabel, checkValues, evidenceLinks, publicationScope } from './review';
 import { ReviewSources, useReviewIssues } from './reviews';
 import { SearchInput } from './results';
@@ -107,17 +109,6 @@ export function ChecksPage({ domain, selected }: { domain: Domain; selected: str
   </>;
 }
 
-function saveFile(file: Blob, filename: string) {
-  const url = URL.createObjectURL(file);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
-}
-
 function Downloads({ domain }: { domain: Domain }) {
   const [pending, setPending] = useState<string>();
   const [feedback, setFeedback] = useState<{ error: boolean; message: string }>();
@@ -177,6 +168,9 @@ function Downloads({ domain }: { domain: Domain }) {
 export function ExportPage({ domain }: { domain: Domain }) {
   return <>
     <PageHeading title="Экспорт" subtitle="Таблицы данных, паспорт и результаты проверок." artwork />
-    <TrackTabs section="export" domain={domain}><Downloads key={domain} domain={domain} /></TrackTabs>
+    <TrackTabs section="export" domain={domain}><div className="stack">
+      <ProjectPassportPanel />
+      <Downloads key={domain} domain={domain} />
+    </div></TrackTabs>
   </>;
 }

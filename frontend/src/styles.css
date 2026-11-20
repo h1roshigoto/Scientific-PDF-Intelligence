@@ -189,6 +189,11 @@ blockquote { margin: 12px 0 0; border-left: 3px solid var(--accent); padding: 8p
 .export-panel { padding: 18px 20px; }
 .export-panel > p { margin: 7px 0 14px; }
 .export-panel > .ribbon { margin-bottom: 14px; min-height: 68px; }
+.passport-filters { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; border: 0; padding: 0; margin: 0; min-width: 0; }
+.passport-filters label { display: grid; gap: 6px; flex: 0 1 300px; min-width: 0; font-weight: 600; }
+.passport-filters select { width: 100%; min-height: 42px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--surface); font-weight: 400; }
+.passport-coverage { margin: 12px 0 16px; }
+.passport-feedback { margin: 12px 0 0; }
 .file-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding-block: 6px; border-top: 1px solid var(--line); }
 .file-list li span { display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
 .download-status { border-radius: 8px; padding: 10px 14px; background: var(--good-soft); color: var(--good); }
@@ -255,6 +260,7 @@ blockquote { margin: 12px 0 0; border-left: 3px solid var(--accent); padding: 8p
   .data-table tbody td::before { display: block; content: attr(data-label); font-size: .66rem; color: var(--muted); margin-bottom: 2px; }
   .row-trigger { min-height: 30px; padding-inline: 2px; }
   .inspector, .export-panel { padding-inline: 14px; }
+  .file-list li .button { padding-inline: 9px; }
   .pdf-toolbar, .pdf-footer { padding-inline: 10px; }
   .pdf-stage { margin-inline: 8px; }
   .info-list { margin-inline: 12px; }
