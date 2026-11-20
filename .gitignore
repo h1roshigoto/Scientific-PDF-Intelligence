@@ -9,3 +9,4 @@ outputs/
 *.pdf
 *.zip
 .DS_Store
+.qa-python/

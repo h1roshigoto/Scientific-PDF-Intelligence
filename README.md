@@ -23,6 +23,8 @@ pytest -q
 
 API docs: http://127.0.0.1:8000/docs
 
+For the light web frontend, see the [frontend startup and test guide](frontend/README.md).
+
 See [API contract](docs/API_CONTRACT.md).
 See the [data passport](passport.md) for CSV schemas and export commands.
 All document identifiers contain the domain prefix (e.g. solar:D001).

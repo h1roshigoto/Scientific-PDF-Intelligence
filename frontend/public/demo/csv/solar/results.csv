@@ -1,0 +1,5 @@
+publication_id,result_id,device_id,measurement_id,material_id,metric_name,metric_value,metric_unit,aggregation,spread_value,n_devices,time_point,time_unit,raw_value,raw_unit,normalized_value,normalized_unit,result_origin,cited_publication_id,source_page,source_section,source_table,source_figure,source_fragment,extraction_status,duplicate_of,note
+D001,demo-solar-d001-pce,,,,PCE,16,%,,,,,,16.00,%,16,%,primary,,5,,Table 2,,FB-SC | PCE | 16.00 %,extracted,,Синтетические данные для проверки интерфейса.
+D001,demo-solar-d001-voc,,,,Voc,1.2,В,,,,,,1200,мВ,1.2,В,primary,,5,,Table 1,,Pristine | Voc | 1200 mV,extracted,,Синтетические данные для проверки интерфейса.
+D021,demo-solar-d021-table,,,,PCE,4,%,,,,,,4.00,%,4,%,primary,,13,,Table 4,,B4 | Table 4 | 4.00 %,extracted,,Синтетические данные для проверки интерфейса.
+D021,demo-solar-d021-figure,,,,PCE,5,%,,,,,,5.00,%,5,%,primary,,13,,,Fig. 10,B4 | Fig. 10 | 5.00 %,extracted,,Синтетические данные для проверки интерфейса.

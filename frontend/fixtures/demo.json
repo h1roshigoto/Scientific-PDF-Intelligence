@@ -1,0 +1,71 @@
+{
+  "documents": [
+    { "document_id": "solar:D001", "domain": "solar", "title": "Демо · Тонкоплёночный солнечный элемент", "page_count": 5 },
+    { "document_id": "solar:D021", "domain": "solar", "title": "Демо · Сравнение условий измерения", "page_count": 13 },
+    { "document_id": "rag:D001", "domain": "rag", "title": "Демо · Сравнение методов RAG", "page_count": 6 },
+    { "document_id": "rag:D002", "domain": "rag", "title": "Демо · Проверка таблицы после OCR", "page_count": 8, "pages_needing_ocr": [8] }
+  ],
+  "results": [
+    {
+      "result_id": "demo-solar-d001-pce", "document_id": "solar:D001", "domain": "solar",
+      "metric": { "name": "PCE" }, "raw": { "value": "16.00", "unit": "%" }, "normalized": { "value": 16, "unit": "%" },
+      "source": { "page": 5, "table": "Table 2", "row": "FB–SC", "column": "PCE", "origin": "primary", "fragment": "FB-SC | PCE | 16.00 %" },
+      "context": { "device_label": "FB–SC", "scan_direction": "reverse" }, "extraction_status": "extracted"
+    },
+    {
+      "result_id": "demo-solar-d001-voc", "document_id": "solar:D001", "domain": "solar",
+      "metric": { "name": "Voc" }, "raw": { "value": "1200", "unit": "мВ" }, "normalized": { "value": 1.2, "unit": "В" },
+      "source": { "page": 5, "table": "Table 1", "row": "Pristine", "column": "Voc", "origin": "primary", "fragment": "Pristine | Voc | 1200 mV" },
+      "context": { "device_label": "Pristine", "measurement_type": "J-V" }, "extraction_status": "verified", "note": "Демо-пересчёт из милливольт в вольты."
+    },
+    {
+      "result_id": "demo-solar-d021-table", "document_id": "solar:D021", "domain": "solar",
+      "metric": { "name": "PCE" }, "raw": { "value": "4.00", "unit": "%" }, "normalized": { "value": 4, "unit": "%" },
+      "source": { "page": 13, "table": "Table 4", "row": "B4", "column": "PCE", "origin": "primary", "fragment": "B4 | Table 4 | 4.00 %" },
+      "context": { "device_label": "B4", "aggregation": "mean" }, "extraction_status": "needs_review"
+    },
+    {
+      "result_id": "demo-solar-d021-figure", "document_id": "solar:D021", "domain": "solar",
+      "metric": { "name": "PCE" }, "raw": { "value": "5.00", "unit": "%" }, "normalized": { "value": 5, "unit": "%" },
+      "source": { "page": 13, "figure": "Fig. 10", "row": "B4", "origin": "primary", "fragment": "B4 | Fig. 10 | 5.00 %" },
+      "context": { "device_label": "B4", "aggregation": "champion" }, "extraction_status": "needs_review"
+    },
+    {
+      "result_id": "demo-rag-d001-em", "document_id": "rag:D001", "domain": "rag",
+      "metric": { "name": "EM" }, "raw": { "value": "0.250", "unit": "fraction" }, "normalized": { "value": 0.25, "unit": "fraction" },
+      "source": { "page": 6, "table": "Table 1", "row": "RA-CoT", "column": "EM", "origin": "primary", "fragment": "RA-CoT | EM | 0.250" },
+      "context": { "method": "RA-CoT", "generator_model": "LLaMA3-8B-Instruct", "dataset_name": "HotpotQA" }, "extraction_status": "extracted"
+    },
+    {
+      "result_id": "demo-rag-d001-f1", "document_id": "rag:D001", "domain": "rag",
+      "metric": { "name": "F1" }, "raw": { "value": "0.40" }, "normalized": {},
+      "source": { "page": 6, "table": "Table 1", "row": "RA-CoT", "column": "F1", "origin": "primary", "fragment": "RA-CoT | F1 | 0.40" },
+      "context": { "method": "RA-CoT", "dataset_name": "HotpotQA" }, "extraction_status": "needs_review"
+    },
+    {
+      "result_id": "demo-rag-d002-mean", "document_id": "rag:D002", "domain": "rag",
+      "metric": { "name": "Mean" }, "raw": { "value": "0.50" }, "normalized": {},
+      "source": { "page": 8, "table": "Table II", "column": "Mean", "origin": "primary", "fragment": "OCR demo | Mean | 0.50" },
+      "context": { "dataset_name": "OCR demo" }, "extraction_status": "needs_review"
+    },
+    {
+      "result_id": "demo-rag-d002-sd", "document_id": "rag:D002", "domain": "rag",
+      "metric": { "name": "SD" }, "raw": { "value": "0.05" }, "normalized": {},
+      "source": { "page": 8, "table": "Table II", "column": "SD", "origin": "primary", "fragment": "OCR demo | SD | 0.05" },
+      "context": { "dataset_name": "OCR demo" }, "extraction_status": "needs_review"
+    }
+  ],
+  "issues": [
+    {
+      "issue_id": "demo-solar-b4", "domain": "solar", "rule_id": "aggregation_context", "severity": "warning",
+      "reason": "Сверьте условия измерения B4. В таблице приведено среднее, а на рисунке показана лучшая ячейка.",
+      "observed": "4.00 % · Table 4 / 5.00 % · Fig. 10", "expected": "У сравниваемых показателей совпадают условия и тип агрегации.",
+      "result_ids": ["demo-solar-d021-table", "demo-solar-d021-figure"]
+    },
+    {
+      "issue_id": "demo-rag-ocr", "domain": "rag", "rule_id": "ocr_column_review", "severity": "warning",
+      "reason": "Сверьте распознанные колонки Mean и SD по изображению страницы.",
+      "result_ids": ["demo-rag-d002-mean", "demo-rag-d002-sd"]
+    }
+  ]
+}
