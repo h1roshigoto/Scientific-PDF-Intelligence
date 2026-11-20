@@ -10,11 +10,11 @@
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
 if (-not (Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
-.\scripts\set-gigachat-key.ps1
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set-gigachat-key.ps1
 .\.venv\Scripts\python.exe -m spi.gigachat_smoke --prepare-only
 ```
 
-Скрипт запрашивает Authorization key из личного кабинета GigaChat без префикса `Basic` и сохраняет его в корневом `.env`. Достаточно сохранить ключ один раз. Для замены запустите тот же скрипт. Ключ хранится в открытом виде на этом компьютере. Git игнорирует `.env`, поэтому в GitHub передаётся только шаблон `.env.example`.
+Скрипт запрашивает Authorization key из личного кабинета GigaChat без префикса `Basic` и сохраняет его в корневом `.env`. `RemoteSigned` действует только в запущенном для скрипта процессе PowerShell. Достаточно сохранить ключ один раз. Для замены запустите тот же скрипт. Ключ хранится в открытом виде на этом компьютере. Git игнорирует `.env`, поэтому в GitHub передаётся только шаблон `.env.example`.
 
 Python автоматически загружает корневой `.env` и при запуске из другого каталога с установленным в editable-режиме проектом. Уже заданные переменные процесса имеют приоритет. В новой сессии PowerShell или Codex можно запускать GigaChat сразу.
 

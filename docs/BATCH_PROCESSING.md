@@ -15,7 +15,7 @@ pytest -q
 
 ```powershell
 if (-not (Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
-.\scripts\set-gigachat-key.ps1
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set-gigachat-key.ps1
 git check-ignore -- .env
 python -c 'from spi.gigachat import GigaChatSettings; print(bool(GigaChatSettings.from_env().credentials.get_secret_value().strip()))'
 ```
