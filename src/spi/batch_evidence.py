@@ -17,7 +17,7 @@ from .gigachat_evidence import EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-3"
+SCHEMA_VERSION = "batch-evidence-4"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -36,7 +36,7 @@ RAG = {
 }
 METRICS = {"solar": SOLAR, "rag": RAG}
 _UNITLESS_RAG_SCORES = {"EM", "F1"}
-UNIT_TAIL = re.compile(r"[\[(]([^()\[\]]+)[\])]\s*$")
+UNIT_TAIL = re.compile(r"[\[(]([^()\[\]]+)[\])](?:\s*[↑↓])?\s*$")
 SUPPLEMENT = re.compile(r"\b(?:supplement(?:ary|al) (?:material|information|data|table|figure)|supporting information)", re.I)
 PROCEDURE = re.compile(
     r"\b(?:we (?:measure[ds]?|evaluat\w*|test\w*|obtain\w*|report\w*|conduct\w*|assess\w*|"
