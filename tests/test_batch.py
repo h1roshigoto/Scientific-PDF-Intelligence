@@ -3,15 +3,21 @@ from hashlib import sha256
 
 import pymupdf
 import pytest
+from fastapi.testclient import TestClient
 
+from spi.api import app
 from spi.batch import discover, preview, report, run_batch
-from spi.batch_checks import check_pce
+from spi.batch_checks import check_pce, validate_results
 from spi.batch_evidence import offline_proposals, verify
 from spi.batch_pdf import Cell, Fragment
+from spi.csv_export import export_submission, read_submission
+from spi.csv_schema import load_schema
 from spi.gigachat import Completion
 from spi.gigachat_evidence import Block, EvidenceError
-from spi.models import PublicationScope
+from spi.models import Evidence, Metric, PublicationScope, ResultRecord, Value
+from spi.pdf import import_pdf
 from spi.storage import Store
+from spi.store_export import project_submission
 
 
 def make_pdf(path, *, scan=False):
@@ -103,6 +109,97 @@ def test_scope_explicit_and_versioned(tmp_path):
         assert bool(current["scope_review_queue"]) == (status == "needs_review")
     with pytest.raises(ValueError, match="does not match"):
         store.save_publication_scopes([decision.model_copy(update={"pdf_sha256": "0"*64})])
+
+
+def test_d021_discrepancy_exports_both_sources_and_follows_scope(tmp_path, monkeypatch):
+    path = tmp_path / "D021.pdf"
+    document_id = "solar:D021"
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((45, 60), "Table 4. B4 (3.85)")
+        pdf.new_page().insert_text((45, 60), "Figure 10. B4 PCE = 5.25%")
+        pdf.save(path)
+    store = Store(tmp_path / "state")
+    doc = import_pdf(store, path, "solar")
+    originals = [
+        ("table", "3.85", Evidence(page=1, table="Table 4", fragment="(3.85)", origin="primary")),
+        ("figure", "5.25", Evidence(page=2, figure="Figure 10", fragment="5.25%", origin="primary")),
+    ]
+    results = [
+        ResultRecord(result_id=f"{document_id}:{key}", document_id=document_id, domain="solar",
+                     metric=Metric(name="PCE"), raw=Value(value=value, unit="%"),
+                     normalized=Value(value=value, unit="%"), source=source,
+                     context={"device_label": "B4", "aggregation": "champion",
+                              "measurement_type": "J-V" if key == "figure" else None},
+                     extraction_status="verified",
+                     extraction_metadata={"pdf_sha256": doc["sha256"], "model_id": "local",
+                                          "method": "pymupdf_verified_table",
+                                          "profile": "solar", "schema_version": "test"})
+        for key, value, source in originals
+    ]
+    _, (issue,) = validate_results(results)
+    assert issue.rule_id == "table_figure_difference"
+    # A linked result under review cannot become a foreign key in the submission.
+    unverified = results[0].model_copy(update={"result_id": f"{document_id}:review",
+                                               "extraction_status": "needs_review"})
+    issue.result_ids.append(unverified.result_id)
+    checkpoint = {**doc, "fragments": {"b4": {"results": [r.model_dump() for r in [*results, unverified]]}},
+                  "science_issues": [issue.model_dump()]}
+    store.save_batch_document(checkpoint)
+    monkeypatch.setenv("SPI_STATE_DIR", str(store.root))
+    client = TestClient(app)
+    schema = load_schema("solar")
+
+    def set_scope(version, status):
+        store.save_publication_scopes([
+            PublicationScope(document_id=document_id, pdf_sha256=version["sha256"], status=status,
+                             reason="Reviewed publication scope", source_pages=[1]),
+        ])
+
+    def export(name):
+        submission = project_submission(store, schema, tmp_path, publication_ids=["D021"])
+        destination = export_submission(schema, submission, tmp_path / name, publication_ids=["D021"])
+        return read_submission(schema, destination).tables
+
+    set_scope(doc, "in_scope")
+    rows = export("included")
+    assert [row["raw_value"] for row in rows["results"]] == ["3.85", "5.25"]
+    assert client.get("/issues?domain=solar").json() == [issue.model_dump()]
+    exported_issue, = rows["issues"]
+    assert tuple(exported_issue) == ("publication_id", "issue_id", "record_ids", "check_name",
+                                     "description", "source_page", "source_fragment")
+    assert exported_issue["publication_id"] == "D021"
+    assert exported_issue["issue_id"] == issue.issue_id
+    assert exported_issue["check_name"] == issue.rule_id
+    assert exported_issue["record_ids"].split(";") == [r.result_id for r in results]
+    assert exported_issue["source_page"] == "1"
+    assert exported_issue["source_fragment"] == "(3.85)"
+    assert json.loads(exported_issue["description"].split("Evidence references (JSON)\n")[1]) == issue.evidence_refs
+
+    set_scope(doc, "out_of_scope")
+    rows = export("excluded")
+    assert rows["publications"][0]["in_scope"] == "false"
+    assert all(not records for table, records in rows.items() if table != "publications")
+    assert client.get("/documents?domain=solar").json()[0]["document_id"] == document_id
+    assert client.get("/results").json() == client.get("/issues").json() == []
+    assert client.get(f"/results/{results[0].result_id}").status_code == 404
+    assert store.results() == [*results, unverified]
+    assert store.issues() == [issue]
+    assert store.batch_documents("solar") == [checkpoint]
+
+    set_scope(doc, "in_scope")
+    assert client.get(f"/results/{results[0].result_id}").json()["raw"]["value"] == "3.85"
+    assert client.get("/issues").json() == [issue.model_dump()]
+    assert export("restored")["issues"] == [exported_issue]
+
+    replacement = make_pdf(tmp_path / "revised.pdf")
+    replacement.replace(path)
+    revised = import_pdf(store, path, "solar")
+    assert revised["sha256"] != doc["sha256"]
+    set_scope(revised, "in_scope")
+    assert client.get("/results").json() == client.get("/issues").json() == []
+    rows = export("revised")
+    assert rows["results"] == rows["issues"] == []
+    assert store.batch_documents("solar") == [checkpoint]
 
 
 def test_verifier_requires_exact_quote_row_column_and_known_unit():

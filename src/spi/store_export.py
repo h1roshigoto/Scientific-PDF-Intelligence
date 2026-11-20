@@ -1,13 +1,15 @@
 """Export SPI records to the seven participant CSV files for a track."""
 
 import argparse
+import json
+from collections import defaultdict
 from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 
 from .csv_export import PDF_ID, Submission, SubmissionError, export_submission
 from .csv_schema import SubmissionSchema, load_schema
-from .models import ResultRecord
+from .models import ResultRecord, ValidationIssue
 from .storage import Store
 
 
@@ -46,6 +48,43 @@ def _related_rows(result: ResultRecord, tables: dict, publication_id: str, schem
     experiment.setdefault("note", f"{result.source.table}, PDF page {result.source.page}")
     tables["experiments"].append(dict(experiment, **prefix, experiment_id=experiment_id))
     return {"config_id": config_id, "dataset_id": dataset_id, "task_id": task_id, "experiment_id": experiment_id}
+
+
+def _issue_rows(issue: ValidationIssue, exported_results, included):
+    related = defaultdict(list)
+    for result_id in dict.fromkeys(issue.result_ids):
+        if result_id in exported_results:
+            related[exported_results[result_id]].append(result_id)
+
+    for document_id, result_ids in related.items():
+        document = included[document_id]
+        refs = []
+        for ref in issue.evidence_refs:
+            if ref.get("document_id") != document_id and not (
+                not ref.get("document_id") and ref.get("result_id") in result_ids
+            ):
+                continue
+            evidence = dict(ref)
+            if evidence.get("result_id") not in result_ids:
+                evidence.pop("result_id", None)
+            refs.append(evidence)
+        # The official CSV has one page and quote pair. Store the complete references in the description.
+        primary = next((ref for ref in refs
+                        if type(ref.get("page")) is int and 1 <= ref["page"] <= document["page_count"]
+                        and isinstance(ref.get("fragment"), str) and ref["fragment"].strip()), {})
+        description = [issue.reason]
+        if issue.observed is not None:
+            description.append(f"Observed value: {issue.observed}")
+        if issue.expected is not None:
+            description.append(f"Comparison value: {issue.expected}")
+        if refs:
+            description.extend(("Evidence references (JSON)", json.dumps(refs, ensure_ascii=False)))
+        yield {
+            "publication_id": document["publication_id"], "issue_id": issue.issue_id,
+            "record_ids": ";".join(result_ids), "check_name": issue.rule_id,
+            "description": "\n".join(description), "source_page": primary.get("page"),
+            "source_fragment": primary.get("fragment"),
+        }
 
 
 def project_submission(
@@ -87,6 +126,7 @@ def project_submission(
         if in_scope:
             included[document_id] = doc
 
+    exported_results = {}
     for result in store.results(schema.domain):
         doc = included.get(result.document_id)
         metadata = result.extraction_metadata
@@ -94,6 +134,7 @@ def project_submission(
                 or metadata.pdf_sha256 != doc["sha256"]):
             continue
         pid = doc["publication_id"]
+        exported_results[result.result_id] = result.document_id
         source = result.source
         notes = [result.note, result.context.get("note")]
         raw_scan = result.context.get("raw_scan_direction")
@@ -116,6 +157,8 @@ def project_submission(
             **({"metric_k": result.metric.k, "metric_variant": result.metric.variant} if schema.domain == "rag"
                else {"aggregation": result.context.get("aggregation")}),
         })
+    for issue in store.issues(schema.domain):
+        tables["issues"].extend(_issue_rows(issue, exported_results, included))
     return Submission(schema.domain, tables)
 
 

@@ -86,6 +86,10 @@ class Store:
         return {(row.document_id, row.pdf_sha256): row for row in
                 map(PublicationScope.model_validate, self.read("publication_scopes.json"))}
 
+    def _excluded_documents(self, hashes):
+        return {document_id for (document_id, digest), scope in self.publication_scopes().items()
+                if scope.status == "out_of_scope" and hashes.get(document_id) == digest}
+
     def save_publication_scopes(self, decisions: list[PublicationScope]) -> None:
         updates = {(row.document_id, row.pdf_sha256): row for row in decisions}
         if not updates or len(updates) != len(decisions):
@@ -102,26 +106,33 @@ class Store:
             scopes.update(updates)
             self.write("publication_scopes.json", [row.model_dump(mode="json") for row in scopes.values()])
 
-    def results(self, domain=None):
+    def results(self, domain=None, *, include_excluded=True):
         hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
+        excluded = set() if include_excluded else self._excluded_documents(hashes)
         rows = {r["result_id"]: r for r in self.read("results.json")}
         for track in (domain,) if domain else ("solar", "rag"):
             for doc in self.batch_documents(track):
-                if doc.get("sha256") != hashes.get(doc["document_id"]):
+                if doc["document_id"] in excluded or doc.get("sha256") != hashes.get(doc["document_id"]):
                     continue
                 for fragment in doc.get("fragments", {}).values():
                     rows.update((r["result_id"], r) for r in fragment.get("results", []))
         return [r for r in map(ResultRecord.model_validate, rows.values())
                 if (domain is None or r.domain == domain)
+                and r.document_id not in excluded
                 and (r.extraction_metadata is None
                      or hashes.get(r.document_id) == r.extraction_metadata.pdf_sha256)]
 
-    def issues(self, domain=None):
+    def issues(self, domain=None, *, include_excluded=True):
         hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
-        rows = self.read("issues.json")
+        excluded = set() if include_excluded else self._excluded_documents(hashes)
+        rows = []
+        for issue in self.read("issues.json"):
+            owners = {ref["document_id"] for ref in issue.get("evidence_refs", ()) if ref.get("document_id")}
+            if not owners or not owners <= excluded:
+                rows.append(issue)
         for track in (domain,) if domain else ("solar", "rag"):
             for doc in self.batch_documents(track):
-                if doc.get("sha256") == hashes.get(doc["document_id"]):
+                if doc["document_id"] not in excluded and doc.get("sha256") == hashes.get(doc["document_id"]):
                     rows.extend(doc.get("science_issues", ()))
         return [r for r in map(ValidationIssue.model_validate, rows)
                 if domain is None or r.domain == domain]
