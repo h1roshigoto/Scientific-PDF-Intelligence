@@ -2,10 +2,14 @@
 import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from .storage import Store
 
 app = FastAPI(title="Scientific PDF Intelligence API", version="0.1.0")
+origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
+if origins:
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"])
 
 
 def store():
@@ -24,14 +28,18 @@ def documents(domain: str | None = Query(None, pattern="^(solar|rag)$")):
 
 @app.get("/results")
 def results(domain: str | None = Query(None, pattern="^(solar|rag)$")):
-    return store().results(domain)
+    return [_result_payload(row) for row in store().results(domain)]
+
+
+def _result_payload(row):
+    return row.model_dump(exclude={"extraction_metadata"} if row.extraction_metadata is None else None)
 
 
 @app.get("/results/{result_id}")
 def result_detail(result_id: str):
     for row in store().results():
         if row.result_id == result_id:
-            return row
+            return _result_payload(row)
     raise HTTPException(404, "Result not found")
 
 
@@ -47,7 +55,8 @@ def document_file(document_id: str):
             path = Path(item["file_path"])
             if not path.is_file() or path.suffix.lower() != ".pdf":
                 raise HTTPException(404, "Original PDF unavailable")
-            return FileResponse(path, media_type="application/pdf", filename=item["filename"])
+            return FileResponse(path, media_type="application/pdf", filename=item["filename"],
+                                content_disposition_type="inline")
     raise HTTPException(404, "Document not found")
 
 

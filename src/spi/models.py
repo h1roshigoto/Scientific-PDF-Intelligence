@@ -40,6 +40,16 @@ class Evidence(BaseModel):
         return self
 
 
+class ExtractionMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model_id: str
+    method: Literal["pymupdf_gigachat_json_schema"]
+    pdf_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    schema_version: str
+    profile: str
+    source_block_id: str | None = None
+
+
 class ResultRecord(BaseModel):
     """A value is never promoted to verified merely because it was parsed."""
     model_config = ConfigDict(extra="forbid")
@@ -53,6 +63,7 @@ class ResultRecord(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     extraction_status: ExtractionStatus = "needs_review"
     note: str | None = None
+    extraction_metadata: ExtractionMetadata | None = None
 
     @model_validator(mode="after")
     def require_raw(self):

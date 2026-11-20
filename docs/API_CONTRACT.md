@@ -18,4 +18,5 @@ row/column, origin), context, extraction_status and note.
 Unknown fields stay null; parsing a PDF alone never verifies a scientific claim.
 Page OCR status is independent of scientific extraction_status.
 
-Next steps include Solar D001 p5, RAG D001 p6, and OCR review on RAG D002 p8.
+See the [frontend handoff](FRONTEND_HANDOFF.md) for Windows startup, CORS,
+D001 source links, and end-to-end verification.
