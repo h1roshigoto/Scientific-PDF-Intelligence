@@ -122,15 +122,30 @@ if ($spiCors.Headers['Access-Control-Allow-Origin'][0] -ne 'http://localhost:517
 
 ## CSV и участнические валидаторы
 
-В примере оригинальные пакеты валидаторов распакованы в `outputs/contracts/solar` и `outputs/contracts/rag`. Укажите фактические пути при другом расположении. Для проверок PDF требуется `pypdf`.
+После обработки обоих D001 загрузите в SPI [решения по предметной области](D001_SCOPE.json). Они приняты по оригиналам и действуют для указанных SHA-256. Solar проверен по изготовлению тонкоплёночных перовскитных элементов и J–V-измерениям, RAG — по поиску во внешнем корпусе, генерации с найденным контекстом и экспериментальной оценке.
+
+`in_scope` переходит в CSV как `true`. `out_of_scope` переходит как `false` с причиной исключения и одной строкой в `publications.csv`. Для `needs_review` экспорт останавливается. Это также состояние по умолчанию для PDF без решения на текущий SHA-256. Для новых статей подготовьте отдельный JSON-массив в том же формате. Для подтверждённого решения укажите основание и номера страниц PDF начиная с единицы. Команда `spi.publication_scope` сверяет SHA-256 и страницы с импортированным документом.
+
+Параметр `--publication-id D001` явно задаёт состав каждого экспорта. При выборе нескольких документов повторите параметр для каждого. Участнические валидаторы получают папки с тем же выбранным набором. В примере PowerShell копирует только D001 каждого трека в отдельный каталог и использует эту копию и при экспорте, и при проверке. Исходные папки `dev` могут содержать другие PDF.
+
+В примере пакеты валидаторов распакованы в `outputs/contracts/solar` и `outputs/contracts/rag`. Укажите фактические пути при другом расположении. Для проверок PDF требуется `pypdf`.
 
 ```powershell
 python -m pip install 'pypdf>=6,<8'
-New-Item -ItemType Directory -Force outputs/handoff-check | Out-Null
-python -m spi.store_export solar outputs/handoff-check/solar --state state --pdf-dir data/solar/dev
-python -m spi.store_export rag outputs/handoff-check/rag --state state --pdf-dir data/rag/dev --template-dir outputs/contracts/rag
-python -X utf8 outputs/contracts/solar/tools/check_submission.py outputs/handoff-check/solar data/solar/dev
-python -X utf8 outputs/contracts/rag/tools/check_submission.py outputs/handoff-check/rag data/rag/dev
+$spiRun = 'outputs/handoff-check-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+New-Item -ItemType Directory -Path "$spiRun/solar-pdfs", "$spiRun/rag-pdfs" | Out-Null
+Copy-Item -LiteralPath 'data/solar/dev/D001.pdf' -Destination "$spiRun/solar-pdfs/D001.pdf"
+Copy-Item -LiteralPath 'data/rag/dev/D001.pdf' -Destination "$spiRun/rag-pdfs/D001.pdf"
+python -m spi.publication_scope docs/D001_SCOPE.json --state state
+if ($LASTEXITCODE -ne 0) { throw 'Scope import failed' }
+python -m spi.store_export solar "$spiRun/solar" --state state --pdf-dir "$spiRun/solar-pdfs" --publication-id D001
+if ($LASTEXITCODE -ne 0) { throw 'Solar export failed' }
+python -m spi.store_export rag "$spiRun/rag" --state state --pdf-dir "$spiRun/rag-pdfs" --publication-id D001 --template-dir outputs/contracts/rag
+if ($LASTEXITCODE -ne 0) { throw 'RAG export failed' }
+python -X utf8 outputs/contracts/solar/tools/check_submission.py "$spiRun/solar" "$spiRun/solar-pdfs"
+if ($LASTEXITCODE -ne 0) { throw 'Solar validation failed' }
+python -X utf8 outputs/contracts/rag/tools/check_submission.py "$spiRun/rag" "$spiRun/rag-pdfs"
+if ($LASTEXITCODE -ne 0) { throw 'RAG validation failed' }
 pytest -q
 ```
 

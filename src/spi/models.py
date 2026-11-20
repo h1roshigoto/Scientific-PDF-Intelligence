@@ -6,6 +6,25 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Domain = Literal["solar", "rag"]
 ExtractionStatus = Literal["extracted", "needs_review", "verified"]
+ScopeStatus = Literal["in_scope", "out_of_scope", "needs_review"]
+
+
+class PublicationScope(BaseModel):
+    """A scope review for one version of an imported PDF."""
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+    document_id: str = Field(pattern=r"^(solar|rag):[A-Za-z0-9][A-Za-z0-9_-]*$")
+    pdf_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    status: ScopeStatus
+    reason: str | None = Field(default=None, min_length=1)
+    source_pages: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def require_review_evidence(self):
+        if self.status != "needs_review" and (not self.reason or not self.source_pages):
+            raise ValueError("A confirmed scope decision requires a reason and PDF source pages")
+        if any(page < 1 for page in self.source_pages):
+            raise ValueError("PDF source pages are 1-based")
+        return self
 
 
 class Value(BaseModel):

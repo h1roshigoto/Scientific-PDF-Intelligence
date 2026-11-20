@@ -6,7 +6,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from .models import ResultRecord, ValidationIssue
+from .models import PublicationScope, ResultRecord, ValidationIssue
 
 
 class Store:
@@ -59,6 +59,26 @@ class Store:
 
     def documents(self):
         return self.read("documents.json")
+
+    def publication_scopes(self) -> dict[tuple[str, str], PublicationScope]:
+        return {(row.document_id, row.pdf_sha256): row for row in
+                map(PublicationScope.model_validate, self.read("publication_scopes.json"))}
+
+    def save_publication_scopes(self, decisions: list[PublicationScope]) -> None:
+        updates = {(row.document_id, row.pdf_sha256): row for row in decisions}
+        if not updates or len(updates) != len(decisions):
+            raise ValueError("Provide one scope decision per document and PDF SHA-256")
+        with self._write_lock():
+            documents = {doc["document_id"]: doc for doc in self.documents()}
+            for decision in decisions:
+                doc = documents.get(decision.document_id)
+                if doc is None or doc.get("sha256") != decision.pdf_sha256:
+                    raise ValueError(f"{decision.document_id}: scope decision does not match an imported PDF SHA-256")
+                if any(page > doc["page_count"] for page in decision.source_pages):
+                    raise ValueError(f"{decision.document_id}: scope evidence page is outside the PDF")
+            scopes = self.publication_scopes()
+            scopes.update(updates)
+            self.write("publication_scopes.json", [row.model_dump(mode="json") for row in scopes.values()])
 
     def results(self, domain=None):
         hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
