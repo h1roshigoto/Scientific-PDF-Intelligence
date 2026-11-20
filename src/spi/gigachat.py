@@ -155,7 +155,7 @@ class GigaChatClient:
                 raise GigaChatError("config", "invalid_ca_bundle") from None
         self._http = httpx.Client(
             verify=tls,
-            timeout=httpx.Timeout(30.0, connect=5.0, write=10.0, pool=5.0),
+            timeout=httpx.Timeout(30.0, connect=12.0, write=10.0, pool=5.0),
             transport=transport,
             trust_env=False,
             follow_redirects=False,
@@ -179,9 +179,15 @@ class GigaChatClient:
                 try:
                     response = self._http.request(method, url, **kwargs)
                 except httpx.RequestError as exc:
-                    status = "tls_error" if _is_tls_error(exc) else "transport_error"
-                    if status == "tls_error":
+                    if _is_tls_error(exc):
+                        status = "tls_error"
                         raise GigaChatError(stage, status) from None
+                    if isinstance(exc, httpx.ConnectTimeout):
+                        status = "connect_timeout"
+                    elif isinstance(exc, httpx.ReadTimeout):
+                        status = "read_timeout"
+                    else:
+                        status = "transport_error"
                     safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
                     if stage != "completion":
                         safe_to_retry |= isinstance(exc, httpx.ReadTimeout)
