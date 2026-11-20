@@ -1,0 +1,76 @@
+"""Internal API contract. Official submission CSV column names come from the supplied templates."""
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+Domain = Literal["solar", "rag"]
+ExtractionStatus = Literal["extracted", "needs_review", "verified"]
+
+
+class Value(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    value: str | float | None = None
+    unit: str | None = None
+
+
+class Metric(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    k: int | None = Field(default=None, ge=0)
+    variant: str | None = None
+
+
+class Evidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page: int = Field(ge=1)
+    fragment: str | None = None
+    section: str | None = None
+    table: str | None = None
+    figure: str | None = None
+    row: str | None = None
+    column: str | None = None
+    origin: Literal["primary", "cited"] | None = None
+    cited_publication_id: str | None = None
+
+    @model_validator(mode="after")
+    def require_location(self):
+        if not any([self.fragment, self.table, self.figure, self.section]):
+            raise ValueError("evidence needs a fragment, table, figure, or section")
+        return self
+
+
+class ResultRecord(BaseModel):
+    """A value is never promoted to verified merely because it was parsed."""
+    model_config = ConfigDict(extra="forbid")
+    result_id: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
+    domain: Domain
+    metric: Metric
+    raw: Value
+    normalized: Value
+    source: Evidence
+    context: dict[str, Any] = Field(default_factory=dict)
+    extraction_status: ExtractionStatus = "needs_review"
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def require_raw(self):
+        if self.raw.value is None:
+            raise ValueError("raw.value is required; unknown values must not become results")
+        if not self.document_id.startswith(self.domain + ":"):
+            raise ValueError("document_id must have the correct domain prefix")
+        return self
+
+
+class ValidationIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    issue_id: str = Field(min_length=1)
+    domain: Domain
+    rule_id: str = Field(min_length=1)
+    severity: Literal["info", "warning", "error"] = "warning"
+    result_ids: list[str] = Field(default_factory=list)
+    evidence_refs: list[dict[str, Any]] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+    observed: str | None = None
+    expected: str | None = None
