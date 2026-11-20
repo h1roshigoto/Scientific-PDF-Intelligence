@@ -105,11 +105,16 @@ def _retry_delay(response: httpx.Response, retries: int) -> float:
 
 
 def _is_tls_error(error: Exception) -> bool:
-    cause: BaseException | None = error
-    while cause is not None:
+    pending: list[BaseException] = [error]
+    seen: set[BaseException] = set()
+    while pending:
+        cause = pending.pop()
         if isinstance(cause, ssl.SSLError):
             return True
-        cause = cause.__cause__
+        if cause in seen:
+            continue
+        seen.add(cause)
+        pending.extend(link for link in (cause.__cause__, cause.__context__) if link is not None)
     return False
 
 
@@ -150,7 +155,7 @@ class GigaChatClient:
                 raise GigaChatError("config", "invalid_ca_bundle") from None
         self._http = httpx.Client(
             verify=tls,
-            timeout=httpx.Timeout(30.0, connect=5.0, write=10.0, pool=5.0),
+            timeout=httpx.Timeout(30.0, connect=12.0, write=10.0, pool=5.0),
             transport=transport,
             trust_env=False,
             follow_redirects=False,
@@ -174,9 +179,15 @@ class GigaChatClient:
                 try:
                     response = self._http.request(method, url, **kwargs)
                 except httpx.RequestError as exc:
-                    status = "tls_error" if _is_tls_error(exc) else "transport_error"
-                    if status == "tls_error":
+                    if _is_tls_error(exc):
+                        status = "tls_error"
                         raise GigaChatError(stage, status) from None
+                    if isinstance(exc, httpx.ConnectTimeout):
+                        status = "connect_timeout"
+                    elif isinstance(exc, httpx.ReadTimeout):
+                        status = "read_timeout"
+                    else:
+                        status = "transport_error"
                     safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
                     if stage != "completion":
                         safe_to_retry |= isinstance(exc, httpx.ReadTimeout)
