@@ -19,16 +19,30 @@ class Store:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
     def write(self, name, data):
-        with NamedTemporaryFile("w", encoding="utf-8", dir=self.root, delete=False) as temp:
-            json.dump(data, temp, ensure_ascii=False, indent=2)
-            temp.write("\n")
-            target = temp.name
-        os.replace(target, self.root / name)
+        target = self.root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as temp:
+                temporary = Path(temp.name)
+                json.dump(data, temp, ensure_ascii=False, indent=2)
+                temp.write("\n")
+            os.replace(temporary, target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     @contextmanager
     def _write_lock(self):
         # The SQLite write lock serializes JSON read-modify-write across processes.
         with closing(sqlite3.connect(self.root / "write-lock.sqlite3", timeout=15)) as lock, lock:
+            lock.execute("BEGIN IMMEDIATE")
+            yield
+
+    @contextmanager
+    def batch_lock(self):
+        # Held across parsing and model calls. A terminated process releases the lock.
+        with closing(sqlite3.connect(self.root / "batch-lock.sqlite3", timeout=0)) as lock, lock:
             lock.execute("BEGIN IMMEDIATE")
             yield
 
@@ -60,6 +74,14 @@ class Store:
     def documents(self):
         return self.read("documents.json")
 
+    def batch_documents(self, domain):
+        return [self.read(path.relative_to(self.root))
+                for path in sorted((self.root / "batch" / domain).glob("*.json"))]
+
+    def save_batch_document(self, record):
+        domain, publication = record["document_id"].split(":", 1)
+        self.write(Path("batch") / domain / f"{publication}.json", record)
+
     def publication_scopes(self) -> dict[tuple[str, str], PublicationScope]:
         return {(row.document_id, row.pdf_sha256): row for row in
                 map(PublicationScope.model_validate, self.read("publication_scopes.json"))}
@@ -82,11 +104,24 @@ class Store:
 
     def results(self, domain=None):
         hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
-        return [r for r in map(ResultRecord.model_validate, self.read("results.json"))
+        rows = {r["result_id"]: r for r in self.read("results.json")}
+        for track in (domain,) if domain else ("solar", "rag"):
+            for doc in self.batch_documents(track):
+                if doc.get("sha256") != hashes.get(doc["document_id"]):
+                    continue
+                for fragment in doc.get("fragments", {}).values():
+                    rows.update((r["result_id"], r) for r in fragment.get("results", []))
+        return [r for r in map(ResultRecord.model_validate, rows.values())
                 if (domain is None or r.domain == domain)
                 and (r.extraction_metadata is None
                      or hashes.get(r.document_id) == r.extraction_metadata.pdf_sha256)]
 
     def issues(self, domain=None):
-        return [r for r in map(ValidationIssue.model_validate, self.read("issues.json"))
+        hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
+        rows = self.read("issues.json")
+        for track in (domain,) if domain else ("solar", "rag"):
+            for doc in self.batch_documents(track):
+                if doc.get("sha256") == hashes.get(doc["document_id"]):
+                    rows.extend(doc.get("science_issues", ()))
+        return [r for r in map(ValidationIssue.model_validate, rows)
                 if domain is None or r.domain == domain]

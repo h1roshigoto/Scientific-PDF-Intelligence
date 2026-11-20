@@ -36,6 +36,7 @@ class GigaChatError(RuntimeError):
         self.code = code
         self.status = status
         self.model_id = model_id
+        self.retries = 0
         super().__init__(f"{stage}: {code}" + (f" (HTTP {status})" if status else ""))
 
 
@@ -78,11 +79,14 @@ class _Choice(BaseModel):
 class Completion(BaseModel):
     model_id: str
     content: str
+    usage: dict[str, int] | None = None
+    retries: int = 0
 
 
 class _CompletionEnvelope(BaseModel):
     model: str
     choices: list[_Choice]
+    usage: dict[str, int] | None = None
 
 
 def is_ultra(model_id: str) -> bool:
@@ -137,6 +141,7 @@ class GigaChatClient:
         settings: GigaChatSettings | None = None,
         *,
         transport: httpx.MockTransport | None = None,
+        max_completion_retries: int = _MAX_RETRIES,
     ):
         self._settings = settings if settings is not None else GigaChatSettings.from_env()
         credentials = self._settings.credentials.get_secret_value().strip()
@@ -147,6 +152,7 @@ class GigaChatClient:
         if self._settings.scope not in _SCOPES:
             raise GigaChatError("config", "invalid_scope")
         self._credentials = SecretStr(credentials)
+        self._max_completion_retries = max_completion_retries
         tls = ssl.create_default_context()
         if self._settings.ca_bundle_file:
             try:
@@ -173,6 +179,7 @@ class GigaChatClient:
     def _request(self, stage: str, method: str, url: str, **kwargs) -> httpx.Response:
         started = time.monotonic()
         retries = 0
+        max_retries = self._max_completion_retries if stage == "completion" else _MAX_RETRIES
         status: str | int = "unknown"
         try:
             while True:
@@ -191,15 +198,16 @@ class GigaChatClient:
                     safe_to_retry = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
                     if stage != "completion":
                         safe_to_retry |= isinstance(exc, httpx.ReadTimeout)
-                    if not safe_to_retry or retries == _MAX_RETRIES:
+                    if not safe_to_retry or retries == max_retries:
                         raise GigaChatError(stage, status) from None
                     delay = 0.5 * 2**retries
                 else:
                     status = response.status_code
                     if response.is_success:
+                        response.extensions["spi_retries"] = retries
                         return response
                     delay = _retry_delay(response, retries)
-                    if status not in _RETRYABLE_STATUS or retries == _MAX_RETRIES or delay > _MAX_RETRY_DELAY:
+                    if status not in _RETRYABLE_STATUS or retries == max_retries or delay > _MAX_RETRY_DELAY:
                         code = "http_error"
                         if stage == "completion" and "response_format" in kwargs["json"]:
                             if _schema_rejected(response):
@@ -207,6 +215,9 @@ class GigaChatClient:
                         raise GigaChatError(stage, code, status)
                 time.sleep(delay)
                 retries += 1
+        except GigaChatError as exc:
+            exc.retries = retries
+            raise
         finally:
             _LOG.info(
                 "gigachat stage=%s model_id=%s status=%s retries=%d elapsed_ms=%.0f",
@@ -288,4 +299,5 @@ class GigaChatClient:
         content = envelope.choices[0].message.content
         if not content:
             raise GigaChatError("completion", "empty_response", model_id=envelope.model)
-        return Completion(model_id=envelope.model, content=content)
+        return Completion(model_id=envelope.model, content=content, usage=envelope.usage,
+                          retries=response.extensions.get("spi_retries", 0))

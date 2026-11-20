@@ -62,7 +62,7 @@ class Evidence(BaseModel):
 class ExtractionMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model_id: str
-    method: Literal["pymupdf_gigachat_json_schema"]
+    method: Literal["pymupdf_gigachat_json_schema", "pymupdf_verified_table"]
     pdf_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     schema_version: str
     profile: str
