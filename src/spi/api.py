@@ -28,7 +28,7 @@ def documents(domain: str | None = Query(None, pattern="^(solar|rag)$")):
 
 @app.get("/results")
 def results(domain: str | None = Query(None, pattern="^(solar|rag)$")):
-    return [_result_payload(row) for row in store().results(domain)]
+    return [_result_payload(row) for row in store().results(domain, include_excluded=False)]
 
 
 def _result_payload(row):
@@ -37,7 +37,7 @@ def _result_payload(row):
 
 @app.get("/results/{result_id}")
 def result_detail(result_id: str):
-    for row in store().results():
+    for row in store().results(include_excluded=False):
         if row.result_id == result_id:
             return _result_payload(row)
     raise HTTPException(404, "Result not found")
@@ -45,7 +45,7 @@ def result_detail(result_id: str):
 
 @app.get("/issues")
 def issues(domain: str | None = Query(None, pattern="^(solar|rag)$")):
-    return store().issues(domain)
+    return store().issues(domain, include_excluded=False)
 
 
 @app.get("/documents/{document_id}/file")

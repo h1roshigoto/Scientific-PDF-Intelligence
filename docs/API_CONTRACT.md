@@ -18,5 +18,12 @@ row/column, origin), context, extraction_status and note.
 Unknown fields stay null; parsing a PDF alone never verifies a scientific claim.
 Page OCR status is independent of scientific extraction_status.
 
+The result list and detail endpoints use the scope decision for the currently
+imported PDF SHA-256. An `out_of_scope` decision hides its results and
+publication-owned batch issues. The original PDF and saved evidence remain
+available in the document registry and local state. Restoring scope for the
+same SHA-256 restores the saved results. The internal `/export/{artifact}`
+endpoint reads stored JSON files directly. It is a historical artifact reader.
+
 See the [frontend handoff](FRONTEND_HANDOFF.md) for Windows startup, CORS,
 D001 source links, and end-to-end verification.
