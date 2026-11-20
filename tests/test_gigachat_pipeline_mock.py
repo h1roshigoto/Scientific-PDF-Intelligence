@@ -166,7 +166,7 @@ def test_wrong_cell_is_neither_cached_nor_exported(case):
 
 def test_missing_key_network_and_schema_errors_create_no_results(case, monkeypatch):
     store, pdf, profile, response = case
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "")
     assert pipeline.process_pdf(store, pdf, profile, lambda *a, **kw: pipeline.GigaChatClient())["error"] == "missing_credentials"
     timeout = Mock(side_effect=GigaChatError("completion", "connect_timeout"))
     assert pipeline.process_pdf(store, pdf, profile, timeout)["error"] == "connect_timeout"

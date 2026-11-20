@@ -153,7 +153,7 @@ def test_429_retries_are_bounded(monkeypatch, failures, retry_after, delays):
 
 
 def test_missing_credentials(monkeypatch):
-    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "")
     with pytest.raises(GigaChatError, match="missing_credentials"):
         GigaChatClient(transport=httpx.MockTransport(lambda _: pytest.fail("sent request")))
 

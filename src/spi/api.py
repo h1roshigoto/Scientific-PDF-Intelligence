@@ -4,8 +4,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from .config import load_project_env
 from .storage import Store
 
+load_project_env()
 app = FastAPI(title="Scientific PDF Intelligence API", version="0.1.0")
 origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
 if origins:

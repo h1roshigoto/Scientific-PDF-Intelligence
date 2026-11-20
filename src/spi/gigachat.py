@@ -14,6 +14,8 @@ from uuid import uuid4
 import httpx
 from pydantic import BaseModel, SecretStr, ValidationError
 
+from .config import load_project_env
+
 
 MODEL_ID = "GigaChat-3-Ultra"
 OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
@@ -47,6 +49,7 @@ class GigaChatSettings(BaseModel):
 
     @classmethod
     def from_env(cls) -> Self:
+        load_project_env()
         return cls(
             credentials=SecretStr(os.getenv("GIGACHAT_CREDENTIALS", "")),
             scope=os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS"),

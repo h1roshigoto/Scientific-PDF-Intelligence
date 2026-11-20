@@ -11,6 +11,7 @@ from pathlib import Path
 import pymupdf
 from pydantic import ValidationError
 
+from .config import load_project_env
 from .gigachat import Completion, GigaChatClient, GigaChatError, is_ultra
 from .gigachat_evidence import (
     RAG, SOLAR, EvidenceError, Extraction, Lookup, Source, make_prompt, prepare_source, verify_extraction,
@@ -148,6 +149,7 @@ def main(argv=None) -> int:
     parser.add_argument("--rag-pdf", type=Path, default=Path("data/rag/dev/D001.pdf"))
     parser.add_argument("--state", default="state")
     args = parser.parse_args(argv)
+    load_project_env()
     store = Store(args.state)
     with ExitStack() as stack:
         @cache
