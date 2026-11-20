@@ -1,6 +1,6 @@
 # P0 frontend ↔ backend contract
 
-Internal format only: official 7+7 CSV column names must be read from participant templates.
+The API serves the internal format. The [data passport](../passport.md) documents the separate CLI and Python CSV export.
 
 Endpoints:
 - GET /health
@@ -18,5 +18,4 @@ row/column, origin), context, extraction_status and note.
 Unknown fields stay null; parsing a PDF alone never verifies a scientific claim.
 Page OCR status is independent of scientific extraction_status.
 
-Next: official CSV templates and passport; real Solar D001 p5, RAG D001 p6;
-OCR review on RAG D002 p8; then rules, batch processing and validation.
+Next steps include Solar D001 p5, RAG D001 p6, and OCR review on RAG D002 p8.
