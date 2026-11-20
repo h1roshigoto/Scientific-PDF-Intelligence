@@ -9,8 +9,14 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set-gigachat-key.ps1
 .\.venv\Scripts\python.exe -m spi.gigachat_smoke --prepare-only
 ```
+
+Скрипт запрашивает Authorization key из личного кабинета GigaChat без префикса `Basic` и сохраняет его в корневом `.env`. `RemoteSigned` действует только в запущенном для скрипта процессе PowerShell. Достаточно сохранить ключ один раз. Для замены запустите тот же скрипт. Ключ хранится в открытом виде на этом компьютере. Git игнорирует `.env`, поэтому в GitHub передаётся только шаблон `.env.example`.
+
+Python автоматически загружает корневой `.env` и при запуске из другого каталога с установленным в editable-режиме проектом. Уже заданные переменные процесса имеют приоритет. В новой сессии PowerShell или Codex можно запускать GigaChat сразу.
 
 По умолчанию используются `data/solar/dev/D001.pdf` и `data/rag/dev/D001.pdf`. Другие пути передаются через `--solar-pdf` и `--rag-pdf`. Команда `--prepare-only` сохраняет выбранные фрагменты без подключения к GigaChat.
 
@@ -18,21 +24,15 @@ API и OAuth используют HTTPS с проверкой имени узл�
 
 Код `connect_timeout` означает, что соединение не установилось за 12 секунд на попытку. Возможны до двух повторов. `read_timeout` означает, что при установленном соединении данные ответа не поступили в отведённое время. При `tls_error` проверьте цепочку сертификатов и путь к PEM.
 
+Проверить наличие ключа без показа значения и запустить онлайн smoke test можно так.
+
 ```powershell
-$env:GIGACHAT_SCOPE = 'GIGACHAT_API_PERS'
-# При необходимости укажите путь к доверенному PEM-файлу.
-# $env:GIGACHAT_CA_BUNDLE_FILE = 'C:\certs\russian_trusted_root_ca_pem.crt'
-$credential = Read-Host 'Authorization key из личного кабинета GigaChat' -AsSecureString
-$env:GIGACHAT_CREDENTIALS = [System.Net.NetworkCredential]::new('', $credential).Password
-try {
-    .\.venv\Scripts\python.exe -m spi.gigachat_smoke
-} finally {
-    Remove-Item Env:GIGACHAT_CREDENTIALS -ErrorAction SilentlyContinue
-    Remove-Variable credential -ErrorAction SilentlyContinue
-}
+git check-ignore -- .env
+.\.venv\Scripts\python.exe -c 'from spi.gigachat import GigaChatSettings; print(bool(GigaChatSettings.from_env().credentials.get_secret_value().strip()))'
+.\.venv\Scripts\python.exe -m spi.gigachat_smoke
 ```
 
-В `GIGACHAT_CREDENTIALS` передаётся Authorization key из личного кабинета без префикса `Basic`. Можно передать эту переменную через локальное хранилище секретов. Используйте маскированный ввод и храните ключ только локально.
+Для личного проекта в шаблоне задан `GIGACHAT_SCOPE=GIGACHAT_API_PERS`. Чтобы указать свой PEM-файл, раскомментируйте `GIGACHAT_CA_BUNDLE_FILE` в локальном `.env` и укажите фактический путь. `missing_credentials` означает, что ключ отсутствует или его перекрывает пустая переменная процесса.
 
 ## Формат и проверка
 

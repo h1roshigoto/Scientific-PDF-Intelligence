@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from .config import load_project_env
 from .gigachat import MODEL_ID, GigaChatClient, GigaChatError, is_ultra
 from .gigachat_evidence import (
     RAG,
@@ -153,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--prepare-only", action="store_true", help="Extract local fragments without network calls")
     parser.add_argument("--json-only", action="store_true", help="Use prompted JSON with local validation")
     args = parser.parse_args(argv)
+    load_project_env()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     logging.getLogger("spi.gigachat").setLevel(logging.INFO)
     args.output_dir.mkdir(parents=True, exist_ok=True)

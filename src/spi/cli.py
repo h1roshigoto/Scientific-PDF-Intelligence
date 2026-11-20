@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 from .batch import discover, preview, report, run_batch
+from .config import load_project_env
 from .pdf import import_pdf
 from .storage import Store
 
@@ -22,6 +23,7 @@ def main(argv=None):
     parser.add_argument("--json-only", action="store_true", help="Require JSON locally without provider schema negotiation")
     parser.add_argument("--report", type=Path, help="Write the full batch report to a local JSON file")
     args = parser.parse_args(argv)
+    load_project_env()
     if args.manifest and (args.path or args.batch or args.dry_run):
         parser.error("--manifest only reads the saved track and does not take a path")
     if not args.manifest and args.path is None:

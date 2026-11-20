@@ -11,7 +11,18 @@ pytest -q
 
 Разложите оригиналы по `data/solar/dev`, `data/rag/dev`, `data/solar/test` и `data/rag/test`. Имя `D001.pdf` даёт идентификатор `solar:D001` или `rag:D001` в зависимости от трека. Для dev, test, локального и модельного прогонов выбирайте отдельные каталоги состояния. Один каталог состояния содержит одну активную версию PDF на идентификатор публикации.
 
-Для GigaChat настройте `GIGACHAT_CREDENTIALS` в текущем PowerShell с маскированным вводом. При необходимости укажите доверенный PEM через `GIGACHAT_CA_BUNDLE_FILE`. Ключ используется клиентом OAuth и не записывается в отчёты. [Настройка GigaChat и TLS](GIGACHAT_SMOKE.md#подготовка-и-запуск)
+Для модели GigaChat один раз создайте локальный `.env` и сохраните Authorization key с маскированным вводом.
+
+```powershell
+if (-not (Test-Path -LiteralPath .env)) { Copy-Item -LiteralPath .env.example -Destination .env }
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File .\scripts\set-gigachat-key.ps1
+git check-ignore -- .env
+python -c 'from spi.gigachat import GigaChatSettings; print(bool(GigaChatSettings.from_env().credentials.get_secret_value().strip()))'
+```
+
+Пакетный CLI, pipeline и smoke test автоматически читают корневой `.env`. В новой сессии PowerShell или Codex повторный ввод ключа не нужен. Для замены ключа снова запустите `scripts/set-gigachat-key.ps1`. При необходимости задайте доверенный PEM через `GIGACHAT_CA_BUNDLE_FILE` в `.env`. FastAPI берёт из этого же файла `SPI_STATE_DIR` и `SPI_CORS_ORIGINS`. Переменные процесса имеют приоритет. Ключ хранится в открытом виде в локальном файле, который игнорирует Git, и не передаётся в GitHub. [Настройка GigaChat и TLS](GIGACHAT_SMOKE.md#подготовка-и-запуск)
+
+Если запускаете FastAPI из разных каталогов, задайте абсолютный `SPI_STATE_DIR`, чтобы всегда использовать одно хранилище. Относительный путь `state` отсчитывается от рабочего каталога процесса.
 
 ## Dev и контрольный набор
 
