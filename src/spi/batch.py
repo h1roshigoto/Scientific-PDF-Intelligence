@@ -13,9 +13,14 @@ from time import perf_counter
 from pydantic import ValidationError
 
 from .batch_checks import validate_results
-from .batch_evidence import PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, make_prompt, offline_proposals, relevant, verify
+from .batch_evidence import (
+    MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, make_prompt, model_fragments,
+    offline_proposals, relevant, verify,
+)
 from .batch_pdf import LAYOUT_VERSION, page_fragments
-from .gigachat import Completion, GigaChatClient, GigaChatError, is_ultra
+from .gigachat import (
+    DEFAULT_COMPLETION_MAX_TOKENS, Completion, GigaChatClient, GigaChatError, completion_diagnostics, is_ultra,
+)
 from .gigachat_evidence import EvidenceError
 from .models import PublicationScope, ResultRecord
 from .pdf import parse_pdf
@@ -99,9 +104,10 @@ def preview(paths, domain, store):
 
 
 class Generation:
-    def __init__(self, complete, max_requests=None):
+    def __init__(self, complete, max_requests=None, completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS):
         self.complete = complete
         self.limit = max_requests
+        self.completion_max_tokens = completion_max_tokens
         self.calls = 0
         self.events = []
 
@@ -113,7 +119,8 @@ class Generation:
         self.events.append(event)
         started = perf_counter()
         completion = None
-        cache_key = sha256(f"{record['revision']}:{fragment.id}".encode()).hexdigest()
+        attempted = False
+        cache_key = sha256(f"{record['revision']}:{MODEL_PLAN_VERSION}:{fragment.id}".encode()).hexdigest()
         cache_file = Path("batch-cache") / f"{cache_key}.json"
         try:
             if self.complete is None:
@@ -128,21 +135,26 @@ class Generation:
                     return {"status": "pending", "error": event["error"], "page": fragment.page}
                 else:
                     self.calls += 1
+                    attempted = True
                     completion = self.complete(make_prompt(fragment, domain), schema=Reply.model_json_schema())
-                event.update(model_id=completion.model_id, usage=completion.usage, retries=completion.retries)
+                event.update(completion_diagnostics(completion))
                 if not is_ultra(completion.model_id):
-                    raise GigaChatError("completion", "unexpected_model", model_id=completion.model_id)
+                    raise GigaChatError("completion", "unexpected_model", model_id=completion.model_id,
+                                        finish_reason=completion.finish_reason, usage=completion.usage,
+                                        max_tokens=completion.max_tokens, retries=completion.retries)
                 model = completion.model_id
                 proposals = Reply.model_validate_json(completion.content).results
                 event["valid_json"] = True
         except GigaChatError as exc:
-            event.update(error=exc.code, stage=exc.stage, http_status=exc.status,
-                         model_id=exc.model_id, retries=exc.retries)
-            return {"status": "pending", "error": f"{exc.stage}:{exc.code}", "page": fragment.page}
+            event.update(completion_diagnostics(exc), error=exc.code, stage=exc.stage, http_status=exc.status)
+            return {"status": "pending", "error": f"{exc.stage}:{exc.code}", "page": fragment.page,
+                    "completion": event}
         except ValidationError:
             event["error"] = "invalid_schema"
             return {"status": "review", "issues": ["invalid_schema"], "page": fragment.page}
         finally:
+            if attempted and event.get("requested_max_tokens") is None:
+                event["requested_max_tokens"] = self.completion_max_tokens
             event["elapsed_ms"] = round((perf_counter() - started) * 1000, 2)
 
         results, issues = {}, []
@@ -171,6 +183,31 @@ def _checkpoint(store, record):
     store.save_batch_document(record)
 
 
+def _plan_model_fragments(fragments, saved):
+    planned = []
+    for fragment in fragments:
+        units = model_fragments(fragment)
+        planned.extend(units)
+        old = saved.get(fragment.id, {})
+        # A previous answer could cover only some of the cells in a grouped fragment.
+        # Keep its validated records and let any uncovered cells be scheduled individually.
+        for unit in units:
+            if not unit.cells or unit.id in saved:
+                continue
+            cell_id = unit.cells[0].value.block_id
+            results = [r for r in old.get("results", ())
+                       if (r.get("extraction_metadata") or {}).get("source_block_id") == cell_id]
+            if results:
+                review = any(r["extraction_status"] != "verified" for r in results)
+                issues = [r["note"] for r in results if r.get("note")]
+                saved[unit.id] = {
+                    "status": "review" if review else "done", "page": unit.page,
+                    "location": unit.location, "results": results, "issues": issues,
+                    "review_source": unit.payload() if review else None,
+                }
+    return planned
+
+
 def _process(store, path, domain, generation, previous):
     pid = f"{domain}:{path.stem}"
     record = {"document_id": pid, "path": str(path), "domain": domain,
@@ -183,7 +220,8 @@ def _process(store, path, domain, generation, previous):
         revision = f"{digest}|{LAYOUT_VERSION}|{PROFILES[domain]}|{SCHEMA_VERSION}|{mode}"
         if previous and previous.get("revision") == revision:
             record = {**previous, "path": str(path)}
-            if record["status"] in {"processed", "partial"} and not any(
+            plan_is_current = mode == "local" or record.get("model_plan_version") == MODEL_PLAN_VERSION
+            if plan_is_current and record["status"] in {"processed", "partial"} and not any(
                 unit["status"] == "pending" for unit in record["fragments"].values()
             ) and not record.get("retry_parse") and not record.get("pending_units") and (
                 record.get("scope_status_at_run") == _scope(store, record)["status"]
@@ -221,17 +259,20 @@ def _process(store, path, domain, generation, previous):
                 for page in pages for block in page["blocks"]
                 if re.search(r"\b(?:solar simulator|source meter|source.measure unit)\b", block["text"], re.I)
             ]
-        record["planned_fragments"] = len(fragments)
         decision = _scope(store, record)
         record["scope_status_at_run"] = decision["status"]
+        if mode == "gigachat":
+            fragments = _plan_model_fragments(fragments, record["fragments"])
+            record["model_plan_version"] = MODEL_PLAN_VERSION
+        record["planned_fragments"] = len(fragments)
+        live = {fragment.id for fragment in fragments}
+        record["fragments"] = {key: val for key, val in record["fragments"].items() if key in live}
         if decision["status"] == "out_of_scope":
             record.update(status="processed", extraction_coverage="excluded_after_scope_review", pending_units=0)
             _checkpoint(store, record)
             return
         # Prioritize proven table geometry before optional prose.
         fragments.sort(key=lambda fragment: (not bool(fragment.cells), fragment.page, fragment.id))
-        live = {fragment.id for fragment in fragments}
-        record["fragments"] = {key: val for key, val in record["fragments"].items() if key in live}
         _checkpoint(store, record)
         for fragment in fragments:
             old = record["fragments"].get(fragment.id)
@@ -240,9 +281,11 @@ def _process(store, path, domain, generation, previous):
             if generation.complete is None and not fragment.cells:
                 continue
             outcome = generation.extract(store, record, fragment)
+            if outcome.get("error") == "request_budget_exhausted":
+                break
             record["fragments"][fragment.id] = outcome
             _checkpoint(store, record)
-            if outcome.get("error") == "request_budget_exhausted" or outcome.get("error", "").startswith(("config:", "oauth:")):
+            if outcome.get("error", "").startswith(("config:", "oauth:")):
                 break
         results = [ResultRecord.model_validate(r) for outcome in record["fragments"].values()
                    for r in outcome.get("results", [])]
@@ -269,7 +312,8 @@ def _process(store, path, domain, generation, previous):
     _checkpoint(store, record)
 
 
-def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False):
+def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False,
+              completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS):
     with ExitStack() as stack:
         try:
             stack.enter_context(store.batch_lock())
@@ -284,9 +328,9 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
             if client is None:
                 options = {"max_completion_retries": 0} if max_requests is not None else {}
                 client = stack.enter_context(GigaChatClient(**options))
-            return client.complete_json(prompt, schema=None if json_only else schema)
+            return client.complete_json(prompt, schema=None if json_only else schema, max_tokens=completion_max_tokens)
 
-        generation = Generation(None if local_only else complete or live, max_requests)
+        generation = Generation(None if local_only else complete or live, max_requests, completion_max_tokens)
         prior = {r["document_id"]: r for r in store.batch_documents(domain)}
         selected = {f"{domain}:{path.stem}" for path in paths}
         # Register every selected PDF before the first expensive operation.

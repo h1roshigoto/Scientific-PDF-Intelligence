@@ -1,10 +1,14 @@
 import json
 from hashlib import sha256
+from time import time
 
+import httpx
 import pymupdf
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
+from spi import batch, cli
 from spi.api import app
 from spi.batch import discover, preview, report, run_batch
 from spi.batch_checks import check_pce, validate_results
@@ -12,7 +16,7 @@ from spi.batch_evidence import offline_proposals, verify
 from spi.batch_pdf import Cell, Fragment
 from spi.csv_export import export_submission, read_submission
 from spi.csv_schema import load_schema
-from spi.gigachat import Completion
+from spi.gigachat import Completion, GigaChatClient, GigaChatSettings
 from spi.gigachat_evidence import Block, EvidenceError
 from spi.models import Evidence, Metric, PublicationScope, ResultRecord, Value
 from spi.pdf import import_pdf
@@ -92,6 +96,133 @@ def test_interruption_resumes_fragments_and_uses_hash_cache(tmp_path):
     assert all(d["pending_units"] == 0 for d in resumed["documents"])
     assert calls.count(calls[0]) == 1
     assert any(event["cache_hit"] for event in resumed["requests_this_run"])
+
+
+@pytest.mark.parametrize(("reason", "code"), [
+    ("length", "finish_length"),
+    ("blacklist", "finish_blacklist"),
+    ("error", "finish_error"),
+    (None, "http_error"),
+])
+def test_batch_cli_reports_failure_and_resumes_one_cell_at_a_time(tmp_path, monkeypatch, caplog, reason, code):
+    pdf = make_pdf(tmp_path / "D001.pdf")
+    state_dir = tmp_path / "state"
+    report_path = tmp_path / "report.json"
+    model = "GigaChat-3-Ultra:32.9.16.9"
+    settings = GigaChatSettings(credentials=SecretStr("batchTestKey=="))
+    sensitive = "batchTestKey== batch-test-oauth private-completion-body"
+    requested_cells = []
+
+    def handle(request):
+        if request.url.path.endswith("/oauth"):
+            return httpx.Response(200, json={"access_token": "batch-test-oauth", "expires_at": int(time()) + 1800})
+        assert request.url.path == "/v1/chat/completions"
+        body = json.loads(request.content)
+        assert body["max_tokens"] == 1800
+        assert body["response_format"]["schema"]["properties"]["results"]["maxItems"] == 1
+        prompt, source = body["messages"][-1]["content"].split("\nPDF source:\n")
+        assert "at most one scientific measurement" in prompt
+        fragment = json.loads(source)
+        cell, = fragment["table_cells"]
+        requested_cells.append(cell["cell"])
+        if len(requested_cells) == 1 and reason is None:
+            return httpx.Response(503, json={"message": sensitive})
+        blocks = {b["block_id"]: b["text"] for b in fragment["blocks"]}
+        header = blocks[cell["headers"][-1]]
+        metric, unit = header.rstrip(")").split(" (")
+        value = blocks[cell["cell"]]
+        prediction = {"results": [{
+            "cell": cell["cell"], "row": cell["row"], "headers": cell["headers"],
+            "block": cell["cell"], "quote": value, "raw_value": value, "raw_unit": unit,
+            "metric": metric, "origin": "primary", "facts": {},
+        }]}
+        first = len(requested_cells) == 1
+        return httpx.Response(200, json={
+            "model": model,
+            "choices": [{
+                "message": {"content": json.dumps(prediction)},
+                "finish_reason": reason if first else "stop",
+            }],
+            "usage": {"completion_tokens": 1800 if first else 125},
+            "raw_private_diagnostic": sensitive,
+        })
+
+    monkeypatch.setattr(batch, "GigaChatClient", lambda **kwargs: GigaChatClient(
+        settings, transport=httpx.MockTransport(handle), **kwargs,
+    ))
+    caplog.set_level("INFO", logger="spi.gigachat")
+
+    def invoke(budget):
+        assert cli.main([
+            str(pdf), "--domain", "solar", "--batch", "--state", str(state_dir),
+            "--report", str(report_path), "--max-requests", str(budget), "--completion-max-tokens", "1800",
+        ]) == 0
+        return json.loads(report_path.read_text(encoding="utf-8"))
+
+    failed = invoke(1)
+    assert len(requested_cells) == 1
+    attempted = failed["requests_this_run"][0]
+    assert attempted["error"] == code
+    assert attempted["finish_reason"] == reason
+    assert attempted["model_id"] == (model if reason else None)
+    assert attempted["completion_tokens"] == (1800 if reason else None)
+    assert attempted["requested_max_tokens"] == 1800
+    assert attempted["retries"] == 0
+    assert attempted["elapsed_ms"] >= 0
+    assert attempted["http_status"] == (None if reason else 503)
+    assert not failed["coverage"]["results"]
+    document = failed["documents"][0]
+    assert document["pending_units"] == document["planned_fragments"] >= 4
+    assert document["fragments"][attempted["fragment"]]["completion"] == attempted
+    for secret in sensitive.split():
+        assert secret not in report_path.read_text(encoding="utf-8") + caplog.text
+
+    budget_only = invoke(0)
+    assert len(requested_cells) == 1
+    assert budget_only["documents"][0]["fragments"][attempted["fragment"]]["completion"] == attempted
+
+    resumed = invoke(1)
+    assert len(requested_cells) == 2
+    assert requested_cells[0] == requested_cells[1]
+    assert resumed["coverage"]["results"] == {"verified": 1}
+    assert resumed["requests_this_run"][0]["finish_reason"] == "stop"
+    assert resumed["requests_this_run"][0]["completion_tokens"] == 125
+    assert resumed["documents"][0]["pending_units"] == document["pending_units"] - 1
+
+    next_cell = invoke(1)
+    assert len(requested_cells) == 3
+    assert requested_cells[2] != requested_cells[1]
+    assert next_cell["coverage"]["results"] == {"verified": 2}
+    assert next_cell["documents"][0]["pending_units"] == document["pending_units"] - 2
+
+
+@pytest.mark.parametrize("limit", ["0", "-1", "4097", "1800.5"])
+def test_batch_cli_rejects_invalid_completion_limit(tmp_path, capsys, limit):
+    with pytest.raises(SystemExit) as caught:
+        cli.main([str(tmp_path), "--domain", "solar", "--batch", "--completion-max-tokens", limit])
+    assert caught.value.code == 2
+    assert "--completion-max-tokens" in capsys.readouterr().err
+
+
+def test_model_plan_keeps_prior_grouped_results_and_schedules_uncovered_cells(tmp_path):
+    pdf = make_pdf(tmp_path / "D001.pdf")
+    store = Store(tmp_path / "state")
+    local = run_batch(store, [pdf], "solar", local_only=True)["documents"][0]
+    fragment_id, fragment = next(iter(local["fragments"].items()))
+    assert len(fragment["results"]) == 2
+    retained = fragment["results"][0]
+    retained["extraction_metadata"]["model_id"] = "GigaChat-3-Ultra"
+    local["fragments"] = {fragment_id: dict(fragment, results=[retained])}
+    local.update(revision=local["revision"].removesuffix("|local") + "|gigachat", mode="gigachat")
+    store.save_batch_document(local)
+
+    resumed = run_batch(store, [pdf], "solar", local_only=False, max_requests=0)
+    checkpoint = resumed["documents"][0]
+    assert resumed["coverage"]["results"] == {"verified": 1}
+    assert [row.result_id for row in store.results("solar")] == [retained["result_id"]]
+    assert fragment_id not in checkpoint["fragments"]
+    assert checkpoint["pending_units"] == checkpoint["planned_fragments"] - 1
+    assert checkpoint["pending_units"] >= 3
 
 
 def test_scope_explicit_and_versioned(tmp_path):

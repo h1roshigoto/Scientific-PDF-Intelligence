@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
 from typing import Literal
@@ -16,6 +17,7 @@ from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
 SCHEMA_VERSION = "batch-evidence-3"
+MODEL_PLAN_VERSION = "single-cell-v1"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
     "PCE": r"PCE|power conversion efficiency|efficiency",
@@ -60,7 +62,26 @@ class Proposal(BaseModel):
 
 class Reply(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
-    results: list[Proposal] = Field(max_length=6)
+    results: list[Proposal] = Field(max_length=1)
+
+
+def _cell_blocks(cell):
+    return (cell.value, *cell.row, *cell.headers, cell.row_axis)
+
+
+def model_fragments(fragment: Fragment) -> list[Fragment]:
+    if not fragment.cells:
+        return [fragment]
+    table_blocks = {block for cell in fragment.cells for block in _cell_blocks(cell)}
+    context = (set(fragment.blocks) - table_blocks) | set(fragment.caption_support) | {fragment.caption}
+    units = []
+    for cell in fragment.cells:
+        evidence = context.union(_cell_blocks(cell))
+        units.append(replace(
+            fragment, id=f"{fragment.id}:cell:{cell.value.block_id}", cells=(cell,),
+            blocks=tuple(block for block in fragment.blocks if block in evidence),
+        ))
+    return units
 
 
 def fold(text: str) -> str:
@@ -264,11 +285,11 @@ def make_prompt(fragment, domain):
         "task_type, evaluation_protocol, metric_definition, top_k, note. Put metric K in metric as Name@K."
     )
     return (
-        "Return JSON {results: [...]} with up to six actual scientific measurements supported by the fragment. "
+        "Return JSON {results: [...]} with at most one scientific measurement supported by the fragment. "
         "Each result has cell (null for prose), row and headers (arrays of block IDs in source order), block "
         "(the value block ID), quote (exact full table cell or complete prose claim), raw_value (the exact "
         "number), raw_unit (explicit unit or empty), metric, origin (primary, cited, or unknown), and facts "
-        "(a dictionary of context field to exact source wording). For table results use the given geometry. "
+        "(a dictionary of context field to exact source wording). Use only the listed target cell and its geometry. "
         "For prose return one unambiguous assertion with one metric, its object and measurement conditions. "
         "Omit unsupported claims and return an empty list if no claim can be grounded. "
         + context + "\nPDF source:\n" + json.dumps(fragment.payload(), ensure_ascii=False)
