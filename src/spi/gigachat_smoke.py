@@ -11,7 +11,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .config import load_project_env
-from .gigachat import MODEL_ID, GigaChatClient, GigaChatError, is_ultra
+from .gigachat import MODEL_ID, GigaChatClient, GigaChatError, completion_diagnostics, is_ultra
 from .gigachat_evidence import (
     RAG,
     SOLAR,
@@ -72,7 +72,7 @@ def _complete(client: GigaChatClient, case: SmokeCase, strict: bool) -> dict:
             make_prompt(case.lookup, case.source),
             schema=Extraction.model_json_schema() if strict else None,
         )
-        observation["model_id"] = completion.model_id
+        observation.update(completion_diagnostics(completion))
         observation["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         data = json.loads(completion.content)
         observation["json_parsed"] = True
@@ -94,7 +94,7 @@ def _complete(client: GigaChatClient, case: SmokeCase, strict: bool) -> dict:
             raise EvidenceError("control_value_mismatch")
         observation["status"] = "verified"
     except GigaChatError as exc:
-        observation.update(error=exc.code, stage=exc.stage, http_status=exc.status, model_id=exc.model_id)
+        observation.update(completion_diagnostics(exc), error=exc.code, stage=exc.stage, http_status=exc.status)
     except json.JSONDecodeError:
         observation["error"] = "invalid_json"
     except ValidationError:
@@ -120,20 +120,20 @@ def _run_live(report: dict, cases: list[SmokeCase], json_only: bool) -> None:
             for case in cases:
                 observation = _complete(client, case, strict)
                 report["requests"].append(observation)
-                if observation["model_id"] and observation.get("error") not in {
-                    "unexpected_model", "unfinished_or_refused", "empty_response",
-                }:
+                reason = observation.get("finish_reason")
+                error = observation.get("error")
+                if observation["model_id"] and reason == "stop" and error not in {"unexpected_model", "empty_response"}:
                     report["ultra_completion_succeeded"] = True
                 if strict:
-                    if observation.get("error") == "strict_schema_rejected":
+                    if error == "strict_schema_rejected":
                         report["strict_schema"] = "rejected_using_prompted_json"
                         strict = False
                     elif observation["schema_valid"]:
                         report["strict_schema"] = "observed_schema_compliant_response"
                     elif report["strict_schema"] == "not_checked":
                         report["strict_schema"] = "not_confirmed"
-                if observation.get("http_status") in {401, 403, 404} or observation.get("error") in {
-                    "unexpected_model", "unfinished_or_refused", "tls_error",
+                if reason not in {None, "stop"} or observation.get("http_status") in {401, 403, 404} or error in {
+                    "unexpected_model", "unexpected_finish_reason", "invalid_choice_count", "tls_error",
                 }:
                     break
     except GigaChatError as exc:

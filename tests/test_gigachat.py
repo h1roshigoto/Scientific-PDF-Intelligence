@@ -58,7 +58,7 @@ def answer_for(case):
         ("missing_quote", True, None, "invalid_schema"),
         ("foreign_quote", True, False, "quote_mismatch"),
         ("wrong_model", False, None, "unexpected_model"),
-        ("refused", False, None, "unfinished_or_refused"),
+        ("refused", False, None, "finish_blacklist"),
     ],
 )
 def test_completion_with_local_schema_and_evidence(scenario, json_parsed, quote_matches, error, caplog):
@@ -76,6 +76,7 @@ def test_completion_with_local_schema_and_evidence(scenario, json_parsed, quote_
         assert request.headers["Authorization"] == "Bearer mock-access-token"
         body = json.loads(request.content)
         assert body["model"] == MODEL_ID
+        assert body["max_tokens"] == 700
         assert body["response_format"]["type"] == "json_schema"
         assert body["response_format"]["strict"] is True
         assert "source_quote" in body["response_format"]["schema"]["required"]
@@ -95,6 +96,47 @@ def test_completion_with_local_schema_and_evidence(scenario, json_parsed, quote_
     assert observation["elapsed_ms"] >= 0
     assert "dGVzdDpmaXh0dXJl" not in caplog.text
     assert "mock-access-token" not in caplog.text
+
+
+@pytest.mark.parametrize(("reason", "reported_reason", "code"), [
+    ("length", "length", "finish_length"),
+    ("blacklist", "blacklist", "finish_blacklist"),
+    ("error", "error", "finish_error"),
+    ("function_call", "function_call", "finish_function_call"),
+    ("mock-access-token", "unknown", "unexpected_finish_reason"),
+    (None, None, "unexpected_finish_reason"),
+])
+def test_unsuccessful_completion_reports_safe_metadata(reason, reported_reason, code, caplog):
+    def handle(request):
+        if request.url.path.endswith("oauth"):
+            return oauth_response(request)
+        assert json.loads(request.content)["max_tokens"] == 1800
+        return httpx.Response(200, json={
+            "model": ACTUAL_MODEL,
+            "choices": [{"finish_reason": reason, "diagnostic": "private PDF text"}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 1800, "mock-access-token": 4},
+        })
+
+    with caplog.at_level(logging.INFO, logger="spi.gigachat"):
+        with GigaChatClient(SETTINGS, transport=httpx.MockTransport(handle)) as client:
+            with pytest.raises(GigaChatError) as caught:
+                client.complete_json("private PDF text", max_tokens=1800)
+    error = caught.value
+    assert error.code == code
+    assert gigachat.completion_diagnostics(error) == {
+        "model_id": ACTUAL_MODEL, "finish_reason": reported_reason,
+        "usage": {"prompt_tokens": 120, "completion_tokens": 1800},
+        "completion_tokens": 1800, "requested_max_tokens": 1800, "retries": 0,
+    }
+    for sensitive in (SETTINGS.credentials.get_secret_value(), "mock-access-token", "private PDF text"):
+        assert sensitive not in str(error) + caplog.text
+
+
+@pytest.mark.parametrize("max_tokens", [0, -1, 4097, 1800.5, True])
+def test_client_rejects_invalid_max_tokens_without_network(max_tokens):
+    with GigaChatClient(SETTINGS, transport=httpx.MockTransport(lambda _: pytest.fail("sent request"))) as client:
+        with pytest.raises(ValueError, match="max_tokens"):
+            client.complete_json("prompt", max_tokens=max_tokens)
 
 
 @pytest.mark.parametrize("stage", ["oauth", "models", "completion"])
@@ -282,3 +324,26 @@ def test_live_runner_falls_back_for_explicit_strict_rejection(monkeypatch):
     assert report["strict_schema"] == "rejected_using_prompted_json"
     assert [item["status"] for item in report["requests"]] == ["needs_review", "verified", "verified"]
     assert ["response_format" in request for request in payloads] == [True, False, False]
+
+
+def test_smoke_stops_after_a_non_stop_completion(monkeypatch):
+    calls = []
+
+    def handle(request):
+        if request.url.path.endswith("oauth"):
+            return oauth_response(request)
+        if request.url.path.endswith("models"):
+            return httpx.Response(200, json={"data": [{"id": MODEL_ID}]})
+        calls.append(request)
+        return completion_response("incomplete", finish_reason="length")
+
+    monkeypatch.setattr(
+        gigachat_smoke, "GigaChatClient",
+        lambda: GigaChatClient(SETTINGS, transport=httpx.MockTransport(handle)),
+    )
+    report = {"requests": [], "strict_schema": "not_checked", "ultra_completion_succeeded": False}
+    gigachat_smoke._run_live(report, [_control(1), _control(2)], json_only=False)
+    assert len(calls) == 1
+    assert report["ultra_completion_succeeded"] is False
+    assert report["requests"][0]["finish_reason"] == "length"
+    assert report["requests"][0]["error"] == "finish_length"

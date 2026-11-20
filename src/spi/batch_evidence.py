@@ -1,8 +1,10 @@
 """Validate model proposals against physical PDF evidence and track-specific context."""
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
+from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
 from typing import Literal
@@ -16,6 +18,7 @@ from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
 SCHEMA_VERSION = "batch-evidence-3"
+MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
     "PCE": r"PCE|power conversion efficiency|efficiency",
@@ -32,6 +35,7 @@ RAG = {
     "BLEU": r"BLEU", "latency": r"latency(?: per query)?",
 }
 METRICS = {"solar": SOLAR, "rag": RAG}
+_UNITLESS_RAG_SCORES = {"EM", "F1"}
 UNIT_TAIL = re.compile(r"[\[(]([^()\[\]]+)[\])]\s*$")
 SUPPLEMENT = re.compile(r"\b(?:supplement(?:ary|al) (?:material|information|data|table|figure)|supporting information)", re.I)
 PROCEDURE = re.compile(
@@ -55,12 +59,41 @@ class Proposal(BaseModel):
     raw_unit: str = Field(max_length=60)
     metric: str = Field(min_length=1, max_length=100)
     origin: Literal["primary", "cited", "unknown"]
-    facts: dict[str, str] = Field(max_length=20)
+    facts: dict[str, str] = Field(default_factory=dict, max_length=20)
 
 
 class Reply(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
-    results: list[Proposal] = Field(max_length=6)
+    results: list[Proposal] = Field(max_length=1)
+
+
+class TableValueMismatch(EvidenceError):
+    def __init__(self, proposal: Proposal, value: str, unit: str):
+        self.fields = {
+            field: {"expected": expected, "proposed": getattr(proposal, field)}
+            for field, expected in (("raw_value", value), ("raw_unit", unit))
+            if getattr(proposal, field) != expected
+        }
+        super().__init__("wrong_table_value_or_unit")
+
+
+def _cell_blocks(cell):
+    return (cell.value, *cell.row, *cell.headers, cell.row_axis)
+
+
+def model_fragments(fragment: Fragment) -> list[Fragment]:
+    if not fragment.cells:
+        return [fragment]
+    table_blocks = {block for cell in fragment.cells for block in _cell_blocks(cell)}
+    context = (set(fragment.blocks) - table_blocks) | set(fragment.caption_support) | {fragment.caption}
+    units = []
+    for cell in fragment.cells:
+        evidence = context.union(_cell_blocks(cell))
+        units.append(replace(
+            fragment, id=f"{fragment.id}:cell:{cell.value.block_id}", cells=(cell,),
+            blocks=tuple(block for block in fragment.blocks if block in evidence),
+        ))
+    return units
 
 
 def fold(text: str) -> str:
@@ -102,9 +135,9 @@ def normalize(raw_value, raw_unit, metric, domain):
     else:
         scales = {"latency": {"ms": ("ms", 1), "s": ("ms", 1000)}}
         if metric in RAG and metric != "latency":
-            if not unit:
-                # A reported score with an unspecified scale remains a raw value.
-                return Value()
+            if not unit and metric in _UNITLESS_RAG_SCORES and 0 <= value <= 1:
+                # EM and F1 are unitless scores in this range. Canonicalize the decimal only.
+                return Value(value=str(value))
             scales[metric] = {"%": ("%", 1), "fraction": ("fraction", 1), "ratio": ("fraction", 1)}
     if unit not in scales.get(metric, {}):
         raise EvidenceError("unknown_unit_or_scale")
@@ -254,7 +287,29 @@ def offline_proposals(fragment, domain):
 
 
 def make_prompt(fragment, domain):
-    import json
+    instructions = (
+        "Return JSON {results: [...]} with at most one scientific measurement supported by the fragment. "
+        "Each result has cell (null for prose), row and headers (arrays of block IDs in source order), block "
+        "(the value block ID), quote (exact full table cell or complete prose claim), raw_value (the original "
+        "numeric string), raw_unit (explicit unit or empty), metric, origin (primary, cited, or unknown), "
+        "and optional facts (a dictionary of context field to exact source wording). "
+        "Preserve the original spelling of raw_value, including leading decimal points and thousands separators. "
+        "Do not normalize the number or infer missing units. Return an empty list if the claim cannot be grounded. "
+    )
+    if fragment.cells:
+        candidates = offline_proposals(fragment, domain)
+        instructions += (
+            "Use only the listed target cell and its geometry. Copy raw_unit from the cell or header exactly, "
+            "or use an empty string if neither prints a unit. Omit facts or use an empty object for a table cell. "
+            "The row and column supply the measurement context. "
+        )
+        if len(candidates) == 1:
+            instructions += (
+                "Check this PDF-derived candidate against the source blocks. If supported, return it exactly.\n"
+                + candidates[0].model_dump_json(exclude={"facts"})
+            )
+        return instructions + "\nPDF source:\n" + json.dumps(fragment.payload(), ensure_ascii=False)
+
     context = (
         "Solar keys include device_label, material_name_raw, formula_normalized, architecture, device_type, "
         "layer_order, layer_material, layer_function, deposition_method, annealing_temperature, "
@@ -264,13 +319,9 @@ def make_prompt(fragment, domain):
         "task_type, evaluation_protocol, metric_definition, top_k, note. Put metric K in metric as Name@K."
     )
     return (
-        "Return JSON {results: [...]} with up to six actual scientific measurements supported by the fragment. "
-        "Each result has cell (null for prose), row and headers (arrays of block IDs in source order), block "
-        "(the value block ID), quote (exact full table cell or complete prose claim), raw_value (the exact "
-        "number), raw_unit (explicit unit or empty), metric, origin (primary, cited, or unknown), and facts "
-        "(a dictionary of context field to exact source wording). For table results use the given geometry. "
+        instructions
+        + "Use empty row and header arrays for prose. "
         "For prose return one unambiguous assertion with one metric, its object and measurement conditions. "
-        "Omit unsupported claims and return an empty list if no claim can be grounded. "
         + context + "\nPDF source:\n" + json.dumps(fragment.payload(), ensure_ascii=False)
     )
 
@@ -317,7 +368,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             raise EvidenceError("wrong_table_metric")
         raw, unit, spread = _table_unit(cell)
         if (raw, unit) != (proposal.raw_value, proposal.raw_unit):
-            raise EvidenceError("wrong_table_value_or_unit")
+            raise TableValueMismatch(proposal, raw, unit)
         context.update(_table_context(cell, fragment, domain))
         geometry = [*cell.row, *cell.headers, source_block]
         if cell.row_axis:
