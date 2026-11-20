@@ -1,6 +1,7 @@
 {
   "documents": [
     { "document_id": "solar:D001", "domain": "solar", "title": "Демо · Тонкоплёночный солнечный элемент", "page_count": 5 },
+    { "document_id": "solar:D006", "domain": "solar", "title": "Демо · Тандем вне области кейса", "page_count": 2 },
     { "document_id": "solar:D021", "domain": "solar", "title": "Демо · Сравнение условий измерения", "page_count": 13 },
     { "document_id": "rag:D001", "domain": "rag", "title": "Демо · Сравнение методов RAG", "page_count": 6 },
     { "document_id": "rag:D002", "domain": "rag", "title": "Демо · Проверка таблицы после OCR", "page_count": 8, "pages_needing_ocr": [8] }
@@ -16,7 +17,14 @@
       "result_id": "demo-solar-d001-voc", "document_id": "solar:D001", "domain": "solar",
       "metric": { "name": "Voc" }, "raw": { "value": "1200", "unit": "мВ" }, "normalized": { "value": 1.2, "unit": "В" },
       "source": { "page": 5, "table": "Table 1", "row": "Pristine", "column": "Voc", "origin": "primary", "fragment": "Pristine | Voc | 1200 mV" },
-      "context": { "device_label": "Pristine", "measurement_type": "J-V" }, "extraction_status": "verified", "note": "Демо-пересчёт из милливольт в вольты."
+      "context": {
+        "device_label": "Pristine", "measurement_type": "J-V", "material_name_raw": "Демо-перовскит", "architecture": "p-i-n",
+        "spectrum": "AM1.5G", "light_intensity": 100, "intensity_unit": "мВт/см²", "temperature": "25 °C",
+        "layers": [
+          { "layer_order": 2, "layer_function": "absorber", "layer_material": "Демо-перовскит", "deposition_method": "Центрифугирование", "annealing_temperature": "100 °C", "annealing_time": "10 мин" },
+          { "layer_order": 1, "layer_function": "HTL", "layer_material": "NiOx", "layer_thickness": 30, "thickness_unit": "нм", "notes": "Подложка очищена перед нанесением." }
+        ]
+      }, "extraction_status": "verified", "note": "Демо-пересчёт из милливольт в вольты. Оборудование из примера — солнечный симулятор Demo-01."
     },
     {
       "result_id": "demo-solar-d021-table", "document_id": "solar:D021", "domain": "solar",
@@ -66,6 +74,65 @@
       "issue_id": "demo-rag-ocr", "domain": "rag", "rule_id": "ocr_column_review", "severity": "warning",
       "reason": "Сверьте распознанные колонки Mean и SD по изображению страницы.",
       "result_ids": ["demo-rag-d002-mean", "demo-rag-d002-sd"]
+    },
+    {
+      "issue_id": "demo-solar-d006-scope", "domain": "solar", "rule_id": "publication_scope", "severity": "warning",
+      "observed": "out_of_scope", "reason": "В синтетическом примере описан двухпереходный тандем. Кейс принимает изготовленные однопереходные приборы.",
+      "evidence_refs": [{ "document_id": "solar:D006", "page": 2, "label": "Тип устройства", "fragment": "Device architecture: two-junction tandem" }]
+    },
+    {
+      "issue_id": "demo-solar-d006-formula", "domain": "solar", "rule_id": "pce_check_pass", "severity": "info",
+      "observed": "20,00 %", "expected": "20,00 %", "reason": "Относительное отклонение 0 % для одного измерения тандема.",
+      "evidence_refs": [{ "document_id": "solar:D006", "page": 2, "label": "Значения для формулы", "fragment": "PCE: 20.00%; Voc: 1.25 V; Jsc: 20 mA/cm2; FF: 0.8; Pin: 100 mW/cm2" }]
+    },
+    {
+      "issue_id": "demo-solar-d001-formula", "domain": "solar", "rule_id": "pce_check_pass", "severity": "info",
+      "observed": "16,00 %", "expected": "16,00 %", "reason": "Относительное отклонение 0 % для одного измерения FB–SC.",
+      "result_ids": ["demo-solar-d001-pce"],
+      "evidence_refs": [{ "document_id": "solar:D001", "page": 5, "label": "Входы Table 2", "fragment": "FB-SC | Voc: 1.0 V | Jsc: 20 mA/cm2 | FF: 0.8 | Pin: 100 mW/cm2" }]
+    },
+    {
+      "issue_id": "demo-solar-d001-duplicate", "domain": "solar", "rule_id": "confirmed_duplicate", "severity": "info",
+      "reason": "Число PCE повторено в тексте и таблице для одного прибора FB–SC и одного измерения. Оба фрагмента относятся к одной записи.",
+      "result_ids": ["demo-solar-d001-pce"],
+      "evidence_refs": [
+        { "document_id": "solar:D001", "page": 4, "label": "Текст результатов", "fragment": "FB-SC reverse scan gave a PCE of 16.00%." },
+        { "document_id": "solar:D001", "page": 5, "label": "Table 2", "fragment": "FB-SC | PCE | 16.00 %" }
+      ]
+    },
+    {
+      "issue_id": "demo-solar-d021-pce", "domain": "solar", "rule_id": "pce_mismatch", "severity": "warning",
+      "observed": "4,00 %", "expected": "5,20 %", "reason": "Относительное отклонение 30 % при допуске 3 %. Расчёт использует совместимые входы для среднего значения B4 из Table 4.",
+      "result_ids": ["demo-solar-d021-table"],
+      "evidence_refs": [
+        { "document_id": "solar:D021", "page": 13, "label": "Заявленный результат", "fragment": "B4 | Table 4 | 4.00 %" },
+        { "document_id": "solar:D021", "page": 12, "label": "Входы расчёта", "fragment": "B4 mean | Voc: 0.8 V | Jsc: 10 mA/cm2 | FF: 0.65 | Pin: 100 mW/cm2" }
+      ]
+    },
+    {
+      "issue_id": "demo-solar-d021-incomplete", "domain": "solar", "rule_id": "pce_not_evaluable", "severity": "info",
+      "reason": "Для лучшей ячейки B4 из Fig. 10 не удалось собрать совместимый набор Voc, Jsc, FF и Pin. Строка сохраняет заявленное значение.",
+      "result_ids": ["demo-solar-d021-figure"]
+    },
+    {
+      "issue_id": "demo-solar-d001-missing-field", "domain": "solar", "rule_id": "field_not_reported", "severity": "info",
+      "observed": "Условия хранения образца", "reason": "В доступном синтетическом тексте и приложенных материалах сведений об условиях хранения нет.",
+      "evidence_refs": [{ "document_id": "solar:D001", "page": 2, "label": "Методы", "fragment": "Methods: sample fabrication and measurement" }]
+    },
+    {
+      "issue_id": "demo-solar-d001-ocr-field", "domain": "solar", "rule_id": "field_extraction_failed", "severity": "warning",
+      "observed": "Толщина поглощающего слоя", "reason": "Толщина показана на схеме, но числовая подпись не читается достаточно уверенно.",
+      "evidence_refs": [{ "document_id": "solar:D001", "page": 3, "label": "Схема слоёв", "fragment": "Absorber thickness: unreadable label in the demo diagram" }]
+    },
+    {
+      "issue_id": "demo-solar-d001-supplement", "domain": "solar", "rule_id": "supplement_unavailable", "severity": "warning",
+      "observed": "Supplementary Table S1", "reason": "Статья ссылается на таблицу S1, но файл приложения не входит в демонстрационный пакет.",
+      "evidence_refs": [{ "document_id": "solar:D001", "page": 2, "label": "Упоминание приложения", "fragment": "Deposition parameters are listed in Supplementary Table S1." }]
+    },
+    {
+      "issue_id": "demo-rag-d002-availability", "domain": "rag", "rule_id": "field_undetermined", "severity": "warning",
+      "observed": "Размер выборки", "reason": "Обработка скана ещё не завершена, наличие параметра в доступном источнике не установлено.",
+      "evidence_refs": [{ "document_id": "rag:D002", "page": 7, "label": "Страница на проверке", "fragment": "Sample size: review of scanned content pending" }]
     }
   ]
 }

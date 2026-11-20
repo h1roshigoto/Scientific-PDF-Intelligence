@@ -1,2 +1,11 @@
 publication_id,issue_id,record_ids,check_name,description,source_page,source_fragment
 D021,demo-solar-b4,demo-solar-d021-table;demo-solar-d021-figure,aggregation_context,"Сверьте условия измерения B4. В таблице приведено среднее, а на рисунке показана лучшая ячейка.",13,B4 | Table 4 | 4.00 %
+D006,demo-solar-d006-scope,,publication_scope,В синтетическом примере описан двухпереходный тандем. Кейс принимает изготовленные однопереходные приборы.,2,Device architecture: two-junction tandem
+D006,demo-solar-d006-formula,,pce_check_pass,Относительное отклонение 0 % для одного измерения тандема.,2,PCE: 20.00%; Voc: 1.25 V; Jsc: 20 mA/cm2; FF: 0.8; Pin: 100 mW/cm2
+D001,demo-solar-d001-formula,demo-solar-d001-pce,pce_check_pass,Относительное отклонение 0 % для одного измерения FB–SC.,5,FB-SC | PCE | 16.00 %
+D001,demo-solar-d001-duplicate,demo-solar-d001-pce,confirmed_duplicate,Число PCE повторено в тексте и таблице для одного прибора FB–SC и одного измерения. Оба фрагмента относятся к одной записи.,5,FB-SC | PCE | 16.00 %
+D021,demo-solar-d021-pce,demo-solar-d021-table,pce_mismatch,Относительное отклонение 30 % при допуске 3 %. Расчёт использует совместимые входы для среднего значения B4 из Table 4.,13,B4 | Table 4 | 4.00 %
+D021,demo-solar-d021-incomplete,demo-solar-d021-figure,pce_not_evaluable,"Для лучшей ячейки B4 из Fig. 10 не удалось собрать совместимый набор Voc, Jsc, FF и Pin. Строка сохраняет заявленное значение.",13,B4 | Fig. 10 | 5.00 %
+D001,demo-solar-d001-missing-field,,field_not_reported,В доступном синтетическом тексте и приложенных материалах сведений об условиях хранения нет.,2,Methods: sample fabrication and measurement
+D001,demo-solar-d001-ocr-field,,field_extraction_failed,"Толщина показана на схеме, но числовая подпись не читается достаточно уверенно.",3,Absorber thickness: unreadable label in the demo diagram
+D001,demo-solar-d001-supplement,,supplement_unavailable,"Статья ссылается на таблицу S1, но файл приложения не входит в демонстрационный пакет.",2,Deposition parameters are listed in Supplementary Table S1.

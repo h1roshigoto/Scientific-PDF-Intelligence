@@ -7,9 +7,10 @@ import type { Domain, Filters } from './domain';
 import { activeDomain, getFilters, Link, parseRoute, resultUrl, sectionUrl, useLocation } from './navigation';
 import type { Section } from './navigation';
 import { provider } from './provider';
-import { InfoList, ResultDetail, ResultEvidence, ResultsPage } from './results';
+import { ResultDetail, ResultEvidence, ResultsPage } from './results';
+import { ScientificReview } from './reviews';
 import { ChecksPage, DocumentsPage, ExportPage } from './secondary-pages';
-import { Feedback, Icon, LoadBoundary, PageHeading, Shell, useData } from './ui';
+import { Feedback, Icon, InfoList, LoadBoundary, PageHeading, Shell, useData } from './ui';
 import './styles.css';
 
 const PdfViewer = lazy(() => import('./pdf-viewer'));
@@ -51,9 +52,12 @@ function DocumentSource({ section, domain, documentId, page, selected }: { secti
         <Suspense fallback={<Feedback kind="loading" title="Загрузка PDF…" />}>
           <PdfViewer key={`${documentId}:${page}`} domain={domain} documentId={documentId} initialPage={page} label={label} />
         </Suspense>
-        <section className="panel inspector"><h2>Документ</h2><InfoList items={[
-          ['Трек', domainName[domain]], ['Публикация', publicationId(doc.document_id)], ['Страниц', doc.page_count ?? '—'], ['DOI', doc.doi ?? doc.DOI ?? '—'],
-        ]} /></section>
+        <div className="stack">
+          <section className="panel inspector"><h2>Документ</h2><InfoList items={[
+            ['Трек', domainName[domain]], ['Публикация', publicationId(doc.document_id)], ['Страниц', doc.page_count ?? '—'], ['DOI', doc.doi ?? doc.DOI ?? '—'],
+          ]} /></section>
+          {section === 'documents' && <ScientificReview domain={domain} documentId={doc.document_id} />}
+        </div>
       </div>
     </>;
   }}</LoadBoundary>;

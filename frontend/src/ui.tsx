@@ -21,6 +21,10 @@ export function StatusBadge({ status }: { status: Status }) {
   return <Badge tone={status === 'verified' ? 'good' : status === 'needs_review' ? 'warn' : 'info'}>{statusLabel[status]}</Badge>;
 }
 
+export function InfoList({ items }: { items: [string, ReactNode][] }) {
+  return <dl className="info-list">{items.map(([label, value], index) => <div key={`${label}-${index}`}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
+}
+
 const navigation: { id: Section; label: string; icon: IconName }[] = [
   { id: 'results', label: 'Результаты', icon: 'grid' },
   { id: 'documents', label: 'Документы', icon: 'file' },

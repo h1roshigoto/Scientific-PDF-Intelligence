@@ -91,19 +91,31 @@ export function formatValue(entry: z.infer<typeof value>, preserveRaw = false) {
   return entry.unit === null || entry.unit === '' ? display : `${display} ${entry.unit}`;
 }
 
-export const contextLabels: Record<string, string> = {
+const contextLabels: Record<string, string> = {
   device_label: 'Прибор', material_name: 'Материал', scan_direction: 'Направление развёртки',
   aggregation: 'Агрегация', dataset_name: 'Набор данных', generator_model: 'Генератор',
   method: 'Метод', top_k: 'top_k конфигурации', evaluation_protocol: 'Протокол оценки',
   measurement_type: 'Измерение', experiment_id: 'Эксперимент', task_type: 'Задача', device_id: 'ID прибора',
   measurement_id: 'ID измерения', config_id: 'ID конфигурации', dataset_id: 'ID набора',
+  material_name_raw: 'Материал', formula_normalized: 'Формула', material_class: 'Класс материала', bandgap_value: 'Ширина запрещённой зоны',
+  bandgap_unit: 'Единица Eg', device_role: 'Роль устройства', device_type: 'Тип устройства', architecture: 'Архитектура', substrate_type: 'Подложка',
+  active_area: 'Активная площадь', area_definition: 'Определение площади', spectrum: 'Спектр', light_intensity: 'Интенсивность света',
+  intensity_unit: 'Единица интенсивности', scan_rate: 'Скорость развёртки', mask_used: 'Маска', temperature: 'Температура',
+  measurement_instrument: 'Оборудование', stability_protocol: 'Протокол стабильности', stress_conditions: 'Условия испытания',
+  layer_order: 'Порядок', layer_function: 'Функция', layer_material: 'Материал слоя', layer_thickness: 'Толщина', thickness_unit: 'Единица толщины',
+  deposition_method: 'Способ нанесения', annealing_temperature: 'Температура отжига', annealing_time: 'Время отжига', atmosphere: 'Атмосфера',
+  notes: 'Примечания', note: 'Примечание',
 };
+
+export function contextLabel(key: string) {
+  return Object.hasOwn(contextLabels, key) ? contextLabels[key] : key;
+}
 
 export function contextText(value: unknown): string {
   if (value == null || value === '') return '—';
   if (Array.isArray(value)) return value.map(contextText).join(', ') || '—';
   if (typeof value === 'object') {
-    return Object.entries(value).map(([key, entry]) => `${contextLabels[key] ?? key} — ${contextText(entry)}`).join(' · ') || '—';
+    return Object.entries(value).map(([key, entry]) => `${contextLabel(key)} — ${contextText(entry)}`).join(' · ') || '—';
   }
   if (typeof value === 'boolean') return value ? 'Да' : 'Нет';
   return String(value);

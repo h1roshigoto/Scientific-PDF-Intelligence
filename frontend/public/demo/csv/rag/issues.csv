@@ -1,2 +1,3 @@
 publication_id,issue_id,record_ids,check_name,description,source_page,source_fragment
 D002,demo-rag-ocr,demo-rag-d002-mean;demo-rag-d002-sd,ocr_column_review,Сверьте распознанные колонки Mean и SD по изображению страницы.,8,OCR demo | Mean | 0.50
+D002,demo-rag-d002-availability,,field_undetermined,"Обработка скана ещё не завершена, наличие параметра в доступном источнике не установлено.",7,Sample size: review of scanned content pending

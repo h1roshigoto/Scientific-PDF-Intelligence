@@ -171,6 +171,21 @@ blockquote { margin: 12px 0 0; border-left: 3px solid var(--accent); padding: 8p
 .issue-inspector > p { margin: 15px 0; }
 .issue-sources { display: grid; gap: 8px; margin-top: 12px; }
 .issue-source { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+.document-status { display: flex; flex-wrap: wrap; gap: 4px; }
+.scientific-review > .muted { margin-top: 8px; }
+.scientific-review > .feedback { margin-top: 12px; box-shadow: none; }
+.review-entries { list-style: none; margin: 12px 0 0; padding: 0; }
+.review-entries > li { padding: 12px 0; border-top: 1px solid var(--line); }
+.review-entries > li:last-child { padding-bottom: 0; }
+.review-entries h3 { margin-bottom: 5px; }
+.review-entries dd { margin: 0; }
+.review-entries dt { color: var(--muted); }
+.review-entries dl { display: grid; gap: 8px; margin-top: 10px; }
+.solar-structure { padding: 14px 20px; }
+.solar-structure summary { cursor: pointer; font-weight: 650; }
+.solar-structure section { margin-top: 16px; }
+.solar-structure .info-list { margin: 6px 0 12px; }
+.layer-entry h4 { margin: 8px 0; }
 .export-panel { padding: 18px 20px; }
 .export-panel > p { margin: 7px 0 14px; }
 .export-panel > .ribbon { margin-bottom: 14px; min-height: 68px; }

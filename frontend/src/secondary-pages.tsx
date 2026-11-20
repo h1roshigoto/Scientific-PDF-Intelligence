@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { errorMessage } from './data';
-import { belongsTo, csvFiles, domainName, publicationId, sourceLabel } from './domain';
+import { csvFiles, domainName, publicationId, sourceLabel } from './domain';
 import type { Domain, Issue, Result } from './domain';
 import { documentSourceUrl, Link, navigate, resultUrl, sectionUrl } from './navigation';
 import { provider } from './provider';
-import { InfoList, SearchInput } from './results';
-import { Badge, Feedback, Icon, LoadBoundary, PageHeading, Ribbon, TrackTabs, useData } from './ui';
+import { checkLabel, checkValues, evidenceLinks, publicationScope } from './review';
+import { ReviewSources, useReviewIssues } from './reviews';
+import { SearchInput } from './results';
+import { Badge, Feedback, Icon, InfoList, LoadBoundary, PageHeading, Ribbon, TrackTabs, useData } from './ui';
 import passport from '../../passport.md?raw';
 
 export function DocumentsPage({ domain, query }: { domain: Domain; query: string }) {
   const load = useCallback((signal: AbortSignal) => provider.documents(domain, signal), [domain]);
   const data = useData(load);
+  const { state: issueState } = useReviewIssues(domain);
   const search = query.trim().toLocaleLowerCase('ru');
   return <>
     <PageHeading title="Документы" subtitle="Реестр PDF, готовность страниц и очередь распознавания." artwork />
@@ -26,15 +29,19 @@ export function DocumentsPage({ domain, query }: { domain: Domain; query: string
             <header className="panel-heading"><h2 id="registry-heading">Реестр PDF</h2><p>Документов: {filtered.length}</p></header>
             <table className="data-table">
               <thead><tr>{['Документ', 'Публикация', 'Страниц', 'Состояние', 'Источник'].map((label) => <th key={label} scope="col">{label}</th>)}</tr></thead>
-              <tbody>{filtered.map((doc) => <tr key={doc.document_id}>
+              <tbody>{filtered.map((doc) => {
+                const scope = issueState.kind === 'ready' ? publicationScope(issueState.data, doc.document_id) : null;
+                return <tr key={doc.document_id}>
                 <td data-label="Документ"><strong>{publicationId(doc.document_id)}</strong></td>
                 <td data-label="Публикация">{doc.title ?? doc.filename ?? '—'}</td>
                 <td data-label="Страниц">{doc.page_count ?? '—'}</td>
-                <td data-label="Состояние">{doc.pages_needing_ocr.length ? <Badge tone="warn">OCR: {doc.pages_needing_ocr.length} стр.</Badge>
+                <td data-label="Состояние"><div className="document-status">{doc.pages_needing_ocr.length ? <Badge tone="warn">OCR: {doc.pages_needing_ocr.length} стр.</Badge>
                   : doc.processing_status === 'parsed_text' || provider.mode === 'mock' ? <Badge tone="info">Текст прочитан</Badge>
-                    : <Badge>{doc.processing_status ?? 'Не указано'}</Badge>}</td>
+                    : <Badge>{doc.processing_status ?? 'Не указано'}</Badge>}
+                  {scope && <Badge tone={scope.tone}>{scope.label}</Badge>}</div></td>
                 <td data-label="Источник"><Link href={documentSourceUrl('documents', domain, doc.document_id, 1)} aria-label={`Открыть PDF ${publicationId(doc.document_id)}`}>Открыть PDF</Link></td>
-              </tr>)}</tbody>
+              </tr>;
+              })}</tbody>
             </table>
           </section>
           <section className="panel inspector"><h2>Состояние страниц</h2><InfoList items={[
@@ -52,17 +59,14 @@ const severity = { info: 'Информация', warning: 'Нужна прове
 
 function IssueDetails({ issue, rows }: { issue: Issue; rows: Result[] }) {
   const related = issue.result_ids.map((id) => ({ id, result: rows.find((row) => row.result_id === id) }));
-  const references = issue.evidence_refs.flatMap((ref) => {
-    const { document_id, page } = ref;
-    return typeof document_id === 'string' && belongsTo(document_id, issue.domain)
-      && typeof page === 'number' && Number.isSafeInteger(page) && page > 0 ? [{ documentId: document_id, page }] : [];
-  });
+  const references = evidenceLinks(issue);
+  const scope = references[0] && publicationScope([issue], references[0].documentId);
   return <section className="panel inspector issue-inspector" aria-labelledby="issue-title">
     <h2 id="issue-title">Причина замечания</h2>
-    <Badge tone={issue.severity === 'warning' ? 'warn' : issue.severity}>{severity[issue.severity]}</Badge>
+    <Badge tone={scope?.tone ?? (issue.severity === 'warning' ? 'warn' : issue.severity)}>{scope?.label ?? severity[issue.severity]}</Badge>
     <p>{issue.reason}</p>
     <InfoList items={[
-      ['Правило', issue.rule_id], ['Наблюдение', issue.observed ?? '—'], ['Ожидаемое', issue.expected ?? '—'],
+      ['Правило', checkLabel(issue)], ...checkValues(issue).filter(([label]) => !scope || label !== 'Наблюдение'),
     ]} />
     {(related.length > 0 || references.length > 0) && <div className="issue-sources">
       <h3>Связанные записи и источники</h3>
@@ -70,9 +74,7 @@ function IssueDetails({ issue, rows }: { issue: Issue; rows: Result[] }) {
         <Link href={resultUrl(issue.domain, id)}>{result ? `${publicationId(result.document_id)} · ${result.metric.name}` : id}</Link>
         {result && <Link href={resultUrl(issue.domain, id, undefined, true)}>{sourceLabel(result.source)}</Link>}
       </div>)}
-      {references.map(({ documentId, page }, index) => <Link key={`${documentId}-${page}-${index}`} href={documentSourceUrl('checks', issue.domain, documentId, page, issue.issue_id)}>
-        {publicationId(documentId)} · стр. {page}
-      </Link>)}
+      <ReviewSources issue={issue} />
     </div>}
   </section>;
 }
@@ -94,7 +96,7 @@ export function ChecksPage({ domain, selected }: { domain: Domain; selected: str
             <header className="panel-heading"><h2 id="checks-heading">Очередь проверки</h2><p>Замечаний: {issues.length}</p></header>
             <ul className="review-list">{issues.map((issue) => <li key={issue.issue_id}>
               <Link href={sectionUrl('checks', domain, undefined, issue.issue_id)} aria-current={chosen.issue_id === issue.issue_id ? 'true' : undefined}>
-                <Icon name="alert" /><span><strong>{issue.rule_id}</strong><small>{issue.reason}</small></span><Icon name="next" size={16} />
+                <Icon name="alert" /><span><strong>{checkLabel(issue)}</strong><small>{issue.reason}</small></span><Icon name="next" size={16} />
               </Link>
             </li>)}</ul>
           </section>

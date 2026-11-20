@@ -1,10 +1,11 @@
 import { useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { contextLabels, contextText, domainName, emptyFilters, filterResults, formatValue, publicationId, selectResult, sourceLabel, statusLabel, subject } from './domain';
+import { contextLabel, contextText, domainName, emptyFilters, filterResults, formatValue, publicationId, selectResult, sourceLabel, statusLabel, subject } from './domain';
 import type { Domain, Filters, Result } from './domain';
 import { Link, navigate, resultUrl, sectionUrl } from './navigation';
 import { provider } from './provider';
-import { Feedback, Icon, LoadBoundary, PageHeading, Ribbon, StatusBadge, TrackTabs, useData } from './ui';
+import { ScientificReview, SolarStructure, solarStructureField } from './reviews';
+import { Feedback, Icon, InfoList, LoadBoundary, PageHeading, Ribbon, StatusBadge, TrackTabs, useData } from './ui';
 
 const metricDescriptions: Record<string, string> = {
   PCE: 'эффективность преобразования', Voc: 'напряжение холостого хода', EM: 'точное совпадение ответа', F1: 'мера F1',
@@ -120,10 +121,6 @@ export function ResultsPage({ domain, filters, selectedId }: { domain: Domain; f
   </>;
 }
 
-export function InfoList({ items }: { items: [string, ReactNode][] }) {
-  return <dl className="info-list">{items.map(([label, value], index) => <div key={`${label}-${index}`}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
-}
-
 export function ResultEvidence({ result, children }: { result: Result; children?: ReactNode }) {
   const { source } = result;
   return <section className="panel inspector">
@@ -144,7 +141,8 @@ export function ResultDetail({ result, filters }: { result: Result; filters: Fil
   const { source } = result;
   const info: [string, ReactNode][] = [
     ['Публикация', `${domainName[result.domain]} / ${publicationId(result.document_id)}`],
-    ...Object.entries(result.context).map(([key, value]): [string, ReactNode] => [contextLabels[key] ?? key, contextText(value)]),
+    ...Object.entries(result.context).filter(([key, value]) => result.domain !== 'solar' || !solarStructureField(key, value))
+      .map(([key, value]): [string, ReactNode] => [contextLabel(key), contextText(value)]),
   ];
   if (result.metric.k !== null) info.push(['metric_k показателя', result.metric.k]);
   if (source.origin) info.push(['Происхождение', source.origin === 'primary' ? 'Первичный результат' : `Цитируемый результат${source.cited_publication_id ? ` · ${source.cited_publication_id}` : ''}`]);
@@ -153,9 +151,15 @@ export function ResultDetail({ result, filters }: { result: Result; filters: Fil
     <PageHeading title={`${domainName[result.domain]} / ${publicationId(result.document_id)}`} subtitle={metricTitle(result)} />
     <div className="action-line"><Link className="button" href={sectionUrl('results', result.domain, filters, result.result_id)}><Icon name="back" size={16} />К результатам</Link></div>
     <div className="split detail-layout">
-      <section className="panel"><header className="panel-heading"><h2>Связанные данные</h2><p>Идентификаторы и условия конкретной записи</p></header>
-        <InfoList items={info} /></section>
-      <ResultEvidence result={result}><Link className="button primary" href={resultUrl(result.domain, result.result_id, filters, true)}>Открыть страницу PDF</Link></ResultEvidence>
+      <div className="stack">
+        <section className="panel"><header className="panel-heading"><h2>Связанные данные</h2><p>Идентификаторы и условия конкретной записи</p></header>
+          <InfoList items={info} /></section>
+        <SolarStructure result={result} />
+      </div>
+      <div className="stack">
+        <ResultEvidence result={result}><Link className="button primary" href={resultUrl(result.domain, result.result_id, filters, true)}>Открыть страницу PDF</Link></ResultEvidence>
+        <ScientificReview domain={result.domain} documentId={result.document_id} recordId={result.result_id} />
+      </div>
     </div>
   </>;
 }

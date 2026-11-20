@@ -17,9 +17,11 @@ def document_id(record):
     return record['document_id'].split(':', maxsplit=1)[1]
 
 
-def write_pdf(document, results):
+def write_pdf(document, results, issues):
     track = document['domain'].upper()
     pid = document_id(document)
+    sources = [result['source'] for result in results if result['document_id'] == document['document_id']]
+    sources.extend(ref for issue in issues for ref in issue.get('evidence_refs', []) if ref['document_id'] == document['document_id'])
     pdf = pymupdf.open()
     for number in range(1, document['page_count'] + 1):
         page = pdf.new_page(width=612, height=600)
@@ -29,14 +31,16 @@ def write_pdf(document, results):
         page.insert_text((44, 108), 'Fixture for verifying document identity and page navigation.', fontsize=12)
         page.insert_text((44, 552), 'Illustrative sample. This PDF contains synthetic values only.', fontsize=11, color=(0.23, 0.31, 0.42))
         top = 183
-        for result in results:
-            source = result['source']
-            if source['page'] != number:
+        shown = set()
+        for source in sources:
+            fragment = source['fragment']
+            if source['page'] != number or fragment in shown:
                 continue
-            label = source.get('table') or source.get('figure')
+            label = source.get('table') or source.get('figure') or 'Review evidence'
             page.insert_text((44, top), label, fontname='hebo', fontsize=15)
             page.draw_rect(pymupdf.Rect(44, top + 12, 568, top + 51), color=(0.69, 0.81, 0.94), fill=(0.89, 0.95, 1))
-            page.insert_text((56, top + 36), source['fragment'], fontsize=13)
+            page.insert_text((56, top + 36), fragment, fontsize=13)
+            shown.add(fragment)
             top += 82
     pdf.save(PUBLIC / f'{document["domain"]}-{pid}.pdf', no_new_id=True, deflate=True)
     pdf.close()
@@ -45,8 +49,14 @@ def write_pdf(document, results):
 def write_csvs(domain, docs, results, issues):
     schema = load_schema(domain)
     tables = {name: [] for name in schema.tables}
+    exclusions = {
+        ref['document_id']: issue['reason']
+        for issue in issues if issue['rule_id'] == 'publication_scope' and issue.get('observed') == 'out_of_scope'
+        for ref in issue.get('evidence_refs', [])
+    }
     tables['publications'] = [
-        {'publication_id': document_id(doc), 'title': doc['title'], 'in_scope': True} for doc in docs
+        {'publication_id': document_id(doc), 'title': doc['title'], 'in_scope': doc['document_id'] not in exclusions,
+         'exclusion_reason': exclusions.get(doc['document_id'])} for doc in docs
     ]
     for result in results:
         source, raw, normalized = result['source'], result['raw'], result['normalized']
@@ -60,11 +70,17 @@ def write_csvs(domain, docs, results, issues):
         })
     results_by_id = {row['result_id']: row for row in results}
     for issue in issues:
-        first = results_by_id[issue['result_ids'][0]]
+        records = issue.get('result_ids', [])
+        if records:
+            first = results_by_id[records[0]]
+            publication, source = document_id(first), first['source']
+        else:
+            source = issue['evidence_refs'][0]
+            publication = document_id(source)
         tables['issues'].append({
-            'publication_id': document_id(first), 'issue_id': issue['issue_id'], 'record_ids': ';'.join(issue['result_ids']),
-            'check_name': issue['rule_id'], 'description': issue['reason'], 'source_page': first['source']['page'],
-            'source_fragment': first['source']['fragment'],
+            'publication_id': publication, 'issue_id': issue['issue_id'], 'record_ids': ';'.join(records),
+            'check_name': issue['rule_id'], 'description': issue['reason'], 'source_page': source['page'],
+            'source_fragment': source['fragment'],
         })
     with TemporaryDirectory() as temp:
         artifacts = export_submission(schema, Submission(domain, tables), Path(temp) / domain,
@@ -79,6 +95,6 @@ if __name__ == '__main__':
     demo = json.loads((FIXTURES / 'demo.json').read_text(encoding='utf-8'))
     PUBLIC.mkdir(parents=True, exist_ok=True)
     for document in demo['documents']:
-        write_pdf(document, [row for row in demo['results'] if row['document_id'] == document['document_id']])
+        write_pdf(document, demo['results'], demo['issues'])
     for track in ('solar', 'rag'):
         write_csvs(track, *([row for row in demo[key] if row['domain'] == track] for key in ('documents', 'results', 'issues')))
