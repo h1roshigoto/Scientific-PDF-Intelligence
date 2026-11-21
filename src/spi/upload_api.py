@@ -3,22 +3,28 @@
 import logging
 import os
 import sqlite3
+from contextlib import contextmanager
 from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
+from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 
 from .models import UPLOAD_ID_PATTERN, ResultRecord, StoredUpload, UploadJobAccepted, UploadProcessing, ValidationIssue
+from .review_models import ReviewDetail, ReviewedResult, ReviewEvent, ReviewOverview, ReviewRequest
 from .upload_processing import UploadProcessingStore
 from .upload_queue import UploadQueue
+from .upload_reviews import ReviewError, UploadReviews
 from .upload_store import InvalidPdf, UploadQuotaFull, UploadStore, UploadTooLarge, upload_token
 
 router = APIRouter(prefix="/uploads", tags=["private uploads"], responses={
@@ -254,3 +260,72 @@ def upload_results(upload_id: UploadId, response: Response, uploads: PrivateStor
 def upload_issues(upload_id: UploadId, response: Response, uploads: PrivateStore):
     response.headers.update(NO_STORE)
     return _scientific_data(upload_id, uploads, issues=True)
+
+
+class _ReviewRoute(APIRoute):
+    def get_route_handler(self):
+        handle = super().get_route_handler()
+
+        async def review_request(request):
+            try:
+                return await handle(request)
+            except RequestValidationError as exc:
+                raise _error(422, "invalid_review_request") from exc
+            except StarletteHTTPException as exc:
+                exc.headers = {**(exc.headers or {}), **NO_STORE}
+                raise
+
+        return review_request
+
+
+review_router = APIRouter(route_class=_ReviewRoute)
+ResultId = Annotated[str, Path(min_length=1, max_length=256)]
+
+
+@contextmanager
+def _reviews(upload_id, response, uploads, *, write=False):
+    upload = _get_upload(upload_id, uploads)
+    queue = _queue(uploads)
+    response.headers.update(NO_STORE)
+    try:
+        with queue.review_snapshot(upload_id, write=write) as job:
+            yield UploadReviews(uploads, upload, queue.root, job, write=write)
+    except ReviewError as exc:
+        raise _error(exc.status, exc.code) from exc
+    except (*STORAGE_ERRORS, RuntimeError) as exc:
+        logger.error("Private review operation failed (%s)", type(exc).__name__)
+        raise _error(500, "upload_review_storage_error") from exc
+
+
+@review_router.get("/{upload_id}/reviews", response_model=ReviewOverview)
+def review_overview(upload_id: UploadId, response: Response, uploads: PrivateStore):
+    with _reviews(upload_id, response, uploads) as reviews:
+        return reviews.overview()
+
+
+@review_router.get("/{upload_id}/results/{result_id}/review", response_model=ReviewDetail)
+def review_detail(upload_id: UploadId, result_id: ResultId, response: Response, uploads: PrivateStore):
+    with _reviews(upload_id, response, uploads) as reviews:
+        return reviews.detail(result_id)
+
+
+@review_router.post("/{upload_id}/results/{result_id}/review", status_code=201, response_model=ReviewDetail)
+def save_review(upload_id: UploadId, result_id: ResultId, request: ReviewRequest, response: Response,
+                uploads: PrivateStore):
+    with _reviews(upload_id, response, uploads, write=True) as reviews:
+        return reviews.save(result_id, request)
+
+
+@review_router.get("/{upload_id}/results/{result_id}/review/history", response_model=list[ReviewEvent])
+def review_history(upload_id: UploadId, result_id: ResultId, response: Response, uploads: PrivateStore):
+    with _reviews(upload_id, response, uploads) as reviews:
+        return reviews.history(result_id)
+
+
+@review_router.get("/{upload_id}/reviewed-results", response_model=list[ReviewedResult])
+def reviewed_results(upload_id: UploadId, response: Response, uploads: PrivateStore):
+    with _reviews(upload_id, response, uploads) as reviews:
+        return reviews.reviewed_results()
+
+
+router.include_router(review_router)

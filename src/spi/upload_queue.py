@@ -62,6 +62,14 @@ class UploadQueue:
         with self._connect() as db:
             return self._get(db, upload_id)
 
+    @contextmanager
+    def review_snapshot(self, upload_id: str, *, write: bool = False):
+        # Keep the job stable until the review transaction commits. The lock
+        # order is always queue -> review database. Reviews never take a worker lock.
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            yield self._get(db, upload_id)
+
     def enqueue(self, upload: StoredUpload) -> UploadJob:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")

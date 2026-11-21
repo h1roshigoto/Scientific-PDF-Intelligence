@@ -3,6 +3,8 @@ import { belongsTo, csvFiles, documentSchema, domainSchema, issueSchema, resultS
 import type { Domain, Issue, Result, ScientificDocument } from './domain';
 import { passportFilename, passportQuery } from './project-passport';
 import type { PassportExport } from './project-passport';
+import { pdfStatus, reviewEventSchema, reviewStateSchema } from './upload-review';
+import type { ReviewRequest } from './upload-review';
 
 export type InternalArtifact = 'results.json' | 'issues.json';
 export interface Provider {
@@ -133,6 +135,16 @@ const processingSchema = z.object({
 });
 export type UploadProcessing = z.infer<typeof processingSchema>;
 
+const reviewDetailSchema = reviewStateSchema.extend({
+  processing_status: processingStatus, pdf_status: pdfStatus, issues: z.array(issueSchema),
+  ocr_pages: z.array(z.number().int().positive()),
+});
+const reviewOverviewSchema = z.object({
+  processing: processingSchema, pdf_status: pdfStatus, issues: z.array(issueSchema), reviews: z.array(reviewStateSchema),
+});
+export type ReviewDetail = z.infer<typeof reviewDetailSchema>;
+export type ReviewEvent = z.infer<typeof reviewEventSchema>;
+
 const uploadDetails = {
   uploads_disabled: 'Загрузка PDF выключена на сервере.',
   uploads_misconfigured: 'Приватная загрузка недоступна. Проверьте настройки сервера.',
@@ -145,6 +157,24 @@ const uploadDetails = {
   upload_storage_error: 'Сервер не смог выполнить операцию с хранилищем. Повторите попытку.',
   upload_processing_unconfigured: 'Обработка PDF ещё не настроена на сервере.',
   upload_processing_storage_error: 'Сервер не смог прочитать или сохранить состояние анализа.',
+  upload_review_storage_error: 'Сервер не смог прочитать или сохранить рецензию. Повторите попытку.',
+  review_revision_conflict: 'Рецензию уже изменили. Обновите данные и повторите решение.',
+  review_source_changed: 'Версия научной записи изменилась. Обновите данные и сверьте источник заново.',
+  review_pdf_changed: 'Оригинал PDF отсутствует или его SHA-256 изменился.',
+  review_processing_active: 'Идёт повторный анализ. После его завершения обновите данные и сверьте источник заново.',
+  review_proposal_required: 'Текущее предложение недоступно. Обновите данные и проверьте историю.',
+  review_warnings_unacknowledged: 'Подтвердите, что учли научные замечания.',
+  review_visual_evidence_required: 'Для этой страницы нужна визуальная сверка с обоснованием.',
+  review_page_outside_pdf: 'Укажите существующую страницу PDF.',
+  review_origin_required: 'Для RAG укажите, первичный это результат или цитируемый.',
+  invalid_review_origin: 'Укажите ID публикации для цитируемого результата. Для первичного результата оставьте это поле пустым.',
+  normalization_evidence_required: 'Укажите единицы или протокол и обоснуйте нормализацию по PDF. Если их нельзя установить, оставьте нормализованное значение пустым.',
+  inconsistent_normalization: 'Нормализованное значение не соответствует исходному значению и указанной единице.',
+  invalid_normalized_value: 'Укажите числовое нормализованное значение. При неизвестном значении оставьте оба поля пустыми.',
+  invalid_review_context: 'Проверьте научный контекст. Укажите top_k как целое неотрицательное число, а metric_k в поле метрики.',
+  empty_review_correction: 'Измените хотя бы одно научное поле.',
+  invalid_review_correction: 'Проверьте исходное значение, единицы и метрику.',
+  invalid_review_request: 'Проверьте значения полей, обоснование и указатель на источник.',
 };
 
 export function createUploadClient(fetcher = fetch) {
@@ -158,6 +188,7 @@ export function createUploadClient(fetcher = fetch) {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   const uploadEndpoint = (id: string, action: string) => `${endpoint}/${encodeURIComponent(id)}/${action}`;
+  const reviewEndpoint = (id: string, result: string) => uploadEndpoint(id, `results/${encodeURIComponent(result)}/review`);
 
   return {
     async list(token: string, signal: AbortSignal) {
@@ -213,6 +244,24 @@ export function createUploadClient(fetcher = fetch) {
     issues(upload: StoredUpload, token: string, signal: AbortSignal) {
       return http.json(uploadEndpoint(upload.upload_id, 'issues'), scoped(issueSchema, upload.domain),
         signal, privateRequest(token));
+    },
+    reviews(id: string, token: string, signal: AbortSignal) {
+      return http.json(uploadEndpoint(id, 'reviews'), reviewOverviewSchema.refine((row) => row.processing.upload_id === id),
+        signal, privateRequest(token));
+    },
+    review(id: string, result: string, token: string, signal: AbortSignal) {
+      return http.json(reviewEndpoint(id, result), reviewDetailSchema.refine((row) => row.result_id === result),
+        signal, privateRequest(token));
+    },
+    saveReview(id: string, result: string, token: string, body: ReviewRequest, signal: AbortSignal) {
+      const init = privateRequest(token);
+      return http.json(reviewEndpoint(id, result), reviewDetailSchema.refine((row) => row.result_id === result), signal, {
+        ...init, method: 'POST', headers: { ...init.headers, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+    },
+    reviewHistory(id: string, result: string, token: string, signal: AbortSignal) {
+      const schema = reviewEventSchema.refine((event) => event.decision.upload_id === id && event.decision.result_id === result);
+      return http.json(`${reviewEndpoint(id, result)}/history`, z.array(schema), signal, privateRequest(token));
     },
   };
 }
