@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-8"
+SCHEMA_VERSION = "batch-evidence-9"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -68,8 +68,9 @@ GENERATOR_HEADER = re.compile(
 )
 RETRIEVER_HEADER = re.compile(r"\b(?:retrievers?|rerankers?|encoders?|embed(?:der|ding)?s?)\b", re.I)
 NON_GENERATOR_COMPARISON = re.compile(
-    r"\b(?:compar\w*|evaluat\w*|test\w*)\s+(?:(?:different|alternative|several|two)\s+)?"
-    r"(?:retrieval (?:methods?|models?|backbones?|strategies?)|reranking|"
+    r"\b(?:compar\w*|evaluat\w*|test\w*)\s+(?:(?:the|different|alternative|several|two)\s+)?"
+    r"(?:(?P<retriever_model>retrieval (?:methods?|models?|backbones?|strategies?)|retrievers?)|"
+    r"(?P<retrieval_method>(?:retrieval\s*(?:/\s*|and\s+))?rerank(?:ing|ers?))|"
     r"prompt(?:ing)? (?:methods?|strategies?|variants?))\b", re.I,
 )
 FIXED_GENERATOR = re.compile(
@@ -691,6 +692,10 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             "reranking": {"dataset_name", "retrieval_method"},
         }.get(context.get("experiment_type"), {"rag_variant", "generator_model", "dataset_name"})
         missing = required - context.keys()
+        if name in _UNITLESS_RAG_SCORES and "generator_model" in context and "experiment_type" not in context:
+            # A caption can name fixed models without grounding the varying model for this cell.
+            missing.update(match.lastgroup for match in NON_GENERATOR_COMPARISON.finditer(_support_caption(fragment))
+                           if match.lastgroup)
         if missing:
             errors.append("rag_context_unresolved")
             unconfirmed.update(dict.fromkeys(sorted(missing), "The table does not establish this experimental role."))

@@ -141,6 +141,28 @@ def test_rag_qa_scores_do_not_make_non_generator_columns_generators(tmp_path, co
         assert result.context["rag_variant"] in {"GPT-4o mini", "Graph RAG"}
 
 
+@pytest.mark.parametrize(("comparison", "missing_role"), [
+    ("compare retrieval backbones", "retriever_model"),
+    ("evaluate reranking models", "retrieval_method"),
+    ("compare retrieval/reranking models", "retrieval_method"),
+])
+def test_rag_named_fixed_generator_requires_varying_retrieval_role(tmp_path, comparison, missing_role):
+    path = rag_multilevel_pdf(
+        tmp_path / "D001.pdf", ("Qwen-Embed",), ("BGE-Reranker",),
+        caption=f"Table 1: We {comparison} on QA datasets (EM and F1); generator: Gemini-2.5 Flash",
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = store.results("rag")
+    assert len(results) == 16
+    for result in results:
+        assert result.extraction_status == "needs_review"
+        assert result.note == "rag_context_unresolved"
+        assert result.context["generator_model"] == "Gemini-2.5 Flash"
+        assert result.context["header_path"][0] in {"Qwen-Embed", "BGE-Reranker"}
+        assert missing_role in result.context["unconfirmed_context"]
+
+
 def mock_model(monkeypatch, first_response):
     calls = []
     settings = GigaChatSettings(credentials=SecretStr("fixtureKey=="))
