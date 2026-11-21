@@ -57,7 +57,7 @@
 .select-control, .passport-filters select { height: 40px; max-width: 100%; padding: 0 10px; background: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-control); font-size: .875rem; }
 .select-control:hover, .passport-filters select:hover { border-color: var(--ink-soft); }
 .advanced-filters { margin-bottom: 16px; }
-.advanced-filters summary, .upload-panel summary, .solar-structure summary { cursor: pointer; font-weight: 600; }
+.advanced-filters summary, .solar-structure summary { cursor: pointer; font-weight: 600; }
 .advanced-filters summary { display: inline-block; padding: 4px 0; color: var(--track); }
 .advanced-filters .toolbar { margin: 8px 0 0; }
 

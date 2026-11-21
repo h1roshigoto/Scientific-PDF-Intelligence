@@ -24,7 +24,7 @@ Frontend открывается на `http://127.0.0.1:5173` и по умолч�
 - Сервер возвращает исходные и нормализованные значения, единицы, контекст и статусы. При отсутствии нормализованного значения интерфейс показывает «—».
 - `GET /export/{artifact}` читает исторические JSON-файлы. Их содержимое может отличаться от актуального списка. Для CSV укажите `VITE_CSV_ARTIFACT_BASE` только после публикации результатов отдельного экспортёра в подпапках `solar/` и `rag/`. Файлы с одинаковыми именами скачиваются отдельно, с сохранением исходных CSV-колонок и содержимого.
 - FastAPI формирует PDF-паспорт проекта через `GET /export/project-passport.pdf`. Установите `VITE_PROJECT_RUN_ID` равным `SPI_RUN_ID` активного Store. По умолчанию фронтенд использует `export/project-passport.pdf` и заголовок `X-SPI-Generated-At`. Их можно настроить через `VITE_PROJECT_PASSPORT_PATH` и `VITE_PROJECT_PASSPORT_GENERATED_AT_HEADER`.
-- PDF регистрируются после импорта по инструкции бэкенда. Приём PDF через сайт пока недоступен.
+- «Документы → Мои загрузки» принимает PDF в приватном режиме FastAPI. Введите токен в форме и выберите Solar или RAG. Оригинал открывается после авторизованного запроса через `/api`. После перезагрузки страницы токен нужно ввести снова. Статус `stored` означает успешное сохранение и техническую проверку. [Настройка приватной загрузки на Windows](../docs/DEMO_RUNBOOK.md#приватная-загрузка-pdf).
 
 HTTP-маршруты описаны в [контракте API](../docs/API_CONTRACT.md). Схему CSV описывает [паспорт данных](../passport.md).
 
@@ -39,4 +39,4 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-Для Playwright установите backend-зависимости командой `python -m pip install -e ..` из папки фронтенда. Playwright запускает Vite на портах 4175–4177 и FastAPI на порту 8182 с временным синтетическим Store. На Windows с установленным Edge можно задать в PowerShell `$env:PLAYWRIGHT_CHANNEL='msedge'`. Результаты проверок доступны в `test-results/`, а HTML-отчёт открывается через `pnpm exec playwright show-report`.
+Для Playwright установите backend-зависимости командой `python -m pip install -e ..` из папки фронтенда. Playwright запускает Vite на портах 4175–4177 и FastAPI на порту 8182 с временным синтетическим научным Store и отдельным хранилищем загрузок. На Windows с установленным Edge можно задать в PowerShell `$env:PLAYWRIGHT_CHANNEL='msedge'`. Результаты проверок доступны в `test-results/`, а HTML-отчёт открывается через `pnpm exec playwright show-report`.

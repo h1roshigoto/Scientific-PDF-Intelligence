@@ -59,6 +59,12 @@ def seed(root: Path) -> Store:
 
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="spi-playwright-") as folder:
-        store = seed(Path(folder))
-        os.environ.update(SPI_STATE_DIR=str(store.root), SPI_RUN_ID="playwright-e2e")
+        root = Path(folder)
+        store = seed(root)
+        os.environ.update(
+            SPI_STATE_DIR=str(store.root), SPI_RUN_ID="playwright-e2e",
+            SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN="synthetic-playwright-token",
+            SPI_UPLOAD_DIR=str(root / "uploads"), SPI_UPLOAD_STATE_DIR=str(root / "upload-state"),
+            SPI_UPLOAD_MAX_BYTES="16384", SPI_UPLOAD_MAX_FILES="20",
+        )
         uvicorn.run("spi.api:app", host="127.0.0.1", port=8182)

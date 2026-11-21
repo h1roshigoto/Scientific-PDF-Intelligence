@@ -26,6 +26,64 @@ available in the document registry and local state. Restoring scope for the
 same SHA-256 restores the saved results. The internal `/export/{artifact}`
 endpoint reads stored JSON files directly. It is a historical artifact reader.
 
+## Private PDF uploads
+
+All four routes require `Authorization: Bearer <token>`. The browser uses
+the same-origin Vite proxy, so it calls `/api/uploads`. Set
+`SPI_UPLOAD_ENABLED=true` and a server-only `SPI_UPLOAD_TOKEN` to enable access.
+
+| Route | Success response |
+| --- | --- |
+| `POST /uploads` | `201 Created` with upload metadata |
+| `GET /uploads` | `200 OK` with an array of metadata, newest first, and `X-SPI-Upload-Max-Bytes` |
+| `GET /uploads/{upload_id}` | `200 OK` with metadata |
+| `GET /uploads/{upload_id}/file` | `200 OK` with the original bytes as an `application/pdf` attachment |
+
+Submit `multipart/form-data` with exactly one `file` and one `domain`
+(`solar` or `rag`). Validity is checked from the file bytes regardless of
+the file part's MIME type or extension. The API limits the PDF part and total
+multipart body as bytes arrive, without using `Content-Length` for validation.
+The default file limit is 25 MiB (`SPI_UPLOAD_MAX_BYTES`). The default
+store-wide quota is 100 files (`SPI_UPLOAD_MAX_FILES`). Repeated names are
+allowed. Each accepted request gets its own opaque ID.
+
+Metadata fields are `upload_id` (32 hexadecimal characters), `domain`,
+`original_filename` (display basename), `size_bytes` (positive integer),
+`sha256` (hexadecimal digest), `page_count` (positive integer), `status`
+(`stored`), and `created_at` (UTC ISO 8601). Upload responses use
+`Cache-Control: no-store` and contain no server paths.
+
+| HTTP status | Meaning |
+| --- | --- |
+| `400` | Malformed multipart body or repeated parts |
+| `401` | Missing or invalid bearer token |
+| `404` | Unknown upload ID or original unavailable |
+| `409` | File count quota reached |
+| `413` | PDF or multipart body exceeds its byte limit |
+| `415` | Request is missing the multipart media type |
+| `422` | Invalid fields, ID format, or PDF (empty, missing signature, damaged, encrypted, or zero pages) |
+| `500` | Upload storage failure |
+| `503` | Uploads disabled or configuration invalid |
+
+`SPI_UPLOAD_DIR` holds originals named `<upload_id>.pdf`.
+`SPI_UPLOAD_STATE_DIR` holds the `uploads.sqlite3` metadata index. Both
+directories must be configured explicitly. Ancestor and descendant overlaps
+with each other or with protected paths are rejected, including resolved
+symlinks and junctions. The original and its metadata remain available after
+the server restarts with the same directories.
+
+`stored` means the original passed technical checks and was saved. Scientific
+extraction, OCR, scope review and verification are separate operations.
+The existing registry, results, exports, and project passport read the
+scientific Store independently. The planned processing contract will use
+`stored → queued → processing → needs_review / completed / failed` after an
+explicit authorized request. A separate worker will bind jobs to the upload ID,
+domain and SHA-256 and call the existing `pdf.py`, batch, OCR and GigaChat
+stages against processing state dedicated to user uploads. Scientific
+verification will continue to require its existing evidence and review checks.
+The Windows setup and the requirements for public deployment are in the
+[demo runbook](DEMO_RUNBOOK.md#приватная-загрузка-pdf).
+
 ## Project passport
 
 Set `SPI_RUN_ID` to the run represented by `SPI_STATE_DIR`. The API serves

@@ -58,7 +58,7 @@ foreach ($spiRoute in 'documents', 'results', 'issues') {
 2. В «Результатах» отфильтруйте Solar D001 по `Voc` и откройте детали. В проверенном Store источники этих записей ведут на физическую страницу 5. Для RAG D001 откройте результат и сверяйте номер по его `source.page`. Переключите страницу, откройте PDF в новой вкладке и вернитесь к отфильтрованному списку.
 3. В «Проверках» откройте замечание и перейдите к связанному evidence. Значок «Сверено» соответствует сохранённому `verified`, а «Нужна проверка» соответствует `needs_review`.
 4. В «Экспорте» скачайте PDF для всего проекта и отдельно для Solar D001 и RAG D001. Проверьте имя файла, время формирования и число страниц. Для проверенного Store числа составили 733, 49 и 511 соответственно. Паспорт включает сохранённые записи для аудита, поэтому счётчик публичного списка может отличаться.
-5. Скачайте `passport.md` как схему данных. `results.json` и `issues.json` возвращают исторические файлы Store. Если файлов ещё нет, API возвращает `[]`. Публикация официального CSV зависит от release gate. Загрузка PDF через сайт пока недоступна.
+5. Скачайте `passport.md` как схему данных. `results.json` и `issues.json` возвращают исторические файлы Store. Если файлов ещё нет, API возвращает `[]`. Публикация официального CSV зависит от release gate.
 
 Для проверки прямого скачивания через прокси используйте PowerShell.
 
@@ -68,6 +68,74 @@ curl.exe --fail --show-error --dump-header - --output "$spiReport" "$spiApi/expo
 ```
 
 В заголовках ожидаются `Content-Type: application/pdf`, `Content-Disposition` с именем файла и `X-SPI-Generated-At`. Проверьте, что PDF открывается и содержит последнюю страницу.
+
+## Приватная загрузка PDF
+
+Загрузка по умолчанию выключена. Для запуска в локальном режиме остановите FastAPI
+и выполните в его вкладке PowerShell из корня репозитория следующие команды.
+Путь для чтения научного Store можно оставить из шага 1. Если
+готового Store нет, укажите отдельный локальный каталог для пустого реестра.
+
+```powershell
+python -m pip install -e '.[dev]'
+$spiLocal = Join-Path $env:LOCALAPPDATA 'ScientificPDFIntelligence'
+# Только если готового научного Store нет:
+# $env:SPI_STATE_DIR = Join-Path $spiLocal 'local-science-state'
+$spiUploads = Join-Path $spiLocal 'private-upload'
+$env:SPI_UPLOAD_DIR = Join-Path $spiUploads 'pdfs'
+$env:SPI_UPLOAD_STATE_DIR = Join-Path $spiUploads 'metadata'
+$env:SPI_UPLOAD_MAX_BYTES = '26214400'
+$env:SPI_UPLOAD_MAX_FILES = '100'
+$env:SPI_UPLOAD_ENABLED = 'true'
+$env:SPI_UPLOAD_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+Set-Clipboard -Value $env:SPI_UPLOAD_TOKEN
+python -m uvicorn spi.api:app --host 127.0.0.1 --port 8000
+```
+
+Оригиналы сохраняются в `pdfs` под серверными именами, метаданные — в
+`metadata\uploads.sqlite3`. Оставьте оба каталога на месте при перезапуске.
+Лимиты выше задают максимум 25 МиБ на PDF и 100 файлов на хранилище. Размещайте
+каталоги в доступной только оператору папке, за пределами checkout и каталога
+статического сайта. Для передачи токена используйте буфер обмена с
+выключенными историей и синхронизацией. После входа очистите его командой
+`Set-Clipboard -Value ' '`. Токен нужен только процессу FastAPI и открытой
+вкладке браузера. Frontend использует настройки прокси из шага 2.
+
+1. Откройте `http://127.0.0.1:5173/documents` или нажмите «Загрузить PDF» на странице «Результаты».
+2. В разделе «Мои загрузки» введите токен. Выберите файл и направление Solar или RAG, затем нажмите «Загрузить PDF».
+3. После сохранения проверьте имя, направление, число страниц, размер и время загрузки. Нажмите «Открыть оригинал» для просмотра и «Обновить список» для повторного запроса к серверу.
+4. После перезагрузки страницы введите токен снова. Файлы и метаданные сохраняются на сервере между его перезапусками.
+
+Статус `stored` подтверждает сохранение и техническую проверку PDF.
+Статус `verified` относится к научной записи, проверенной по evidence.
+Сохранённый PDF появится в «Моих загрузках». Результаты, отчёты и корпус
+научного Store ведутся отдельно.
+
+Для прямой проверки через прокси выполните команды в новой вкладке PowerShell.
+Вставьте токен в скрытое поле. Запрос POST получает заголовок через stdin,
+поэтому токен не передаётся в аргументах процесса curl.
+
+```powershell
+$spiUploadApi = 'http://127.0.0.1:5173/api/uploads'
+$spiSecureToken = Read-Host 'Токен загрузки' -AsSecureString
+$spiHeaders = @{ Authorization = 'Bearer ' + [System.Net.NetworkCredential]::new('', $spiSecureToken).Password }
+$spiPdf = (Resolve-Path -LiteralPath (Read-Host 'Путь к локальному PDF') -ErrorAction Stop).Path
+$spiRecord = ("Authorization: " + $spiHeaders.Authorization) |
+    curl.exe --fail --show-error --silent --header '@-' --form "file=@$spiPdf" --form 'domain=solar' $spiUploadApi |
+    ConvertFrom-Json
+$spiRecord
+Invoke-RestMethod -Uri $spiUploadApi -Headers $spiHeaders
+$spiCopy = Join-Path $env:TEMP ("spi-" + $spiRecord.upload_id + ".pdf")
+Invoke-WebRequest -UseBasicParsing -Uri "$spiUploadApi/$($spiRecord.upload_id)/file" -Headers $spiHeaders -OutFile $spiCopy
+Invoke-Item -LiteralPath $spiCopy
+Remove-Variable spiHeaders,spiSecureToken
+```
+
+Этот режим рассчитан на loopback или закрытую сеть с доверенными операторами.
+Один общий токен даёт доступ ко всем файлам приватного хранилища.
+Перед публикацией нужны TLS, отдельные пользовательские сессии, проверка
+владения при чтении метаданных и оригиналов, лимиты частоты и параллельности,
+квоты по пользователю и изоляция ресурсов для обработки недоверенных PDF.
 
 ## 4. Регрессии
 
@@ -83,7 +151,7 @@ pnpm.cmd exec playwright install chromium
 pnpm.cmd test:e2e
 ```
 
-Если Chromium не скачивается, для Windows можно запустить Playwright через установленный Edge командой `$env:PLAYWRIGHT_CHANNEL = 'msedge'` перед `pnpm.cmd test:e2e`. Playwright поднимает тестовые серверы на `4175`, `4176`, `4177` и `8182`. `real-api.spec.ts` запускает отдельный временный Store с искусственными проверочными записями и PDF.
+Если Chromium не скачивается, для Windows можно запустить Playwright через установленный Edge командой `$env:PLAYWRIGHT_CHANNEL = 'msedge'` перед `pnpm.cmd test:e2e`. Playwright поднимает тестовые серверы на `4175`, `4176`, `4177` и `8182`. `real-api.spec.ts` и `real-upload.spec.ts` используют отдельные временные каталоги с искусственными научными записями, PDF и метаданными загрузок.
 
 ## Диагностика
 

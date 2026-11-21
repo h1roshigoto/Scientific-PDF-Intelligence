@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useRef } from 'react';
+import { StrictMode, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@fontsource-variable/golos-text';
 import '@fontsource/pt-serif/400.css';
@@ -16,6 +16,7 @@ import './styles/index.css';
 
 function App() {
   const url = useLocation();
+  const [uploadToken, setUploadToken] = useState('');
   const previousPath = useRef(url.pathname);
 
   useEffect(() => {
@@ -47,7 +48,7 @@ function App() {
       />
     );
   } else if (route.section === 'documents') {
-    content = <DocumentsPage query={filters.query} />;
+    content = <DocumentsPage query={filters.query} uploadToken={uploadToken} setUploadToken={setUploadToken} />;
   } else if (route.section === 'checks') {
     content = <ChecksPage selected={selected} />;
   } else if (route.section === 'export') {

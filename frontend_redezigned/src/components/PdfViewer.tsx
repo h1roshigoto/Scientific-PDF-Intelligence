@@ -42,7 +42,7 @@ function PdfPage({ pdf, page, label }: { pdf: Pdf; page: number; label: string }
       if (!active) return;
       const natural = source.getViewport({ scale: 1 });
       const available = Math.max(width - 24, 240);
-      const scale = Math.min(available, 760) / natural.width;
+      const scale = Math.min(Math.min(available, 760) / natural.width, 1600 / natural.height);
       const ratio = Math.min(window.devicePixelRatio || 1, 2);
       const viewport = source.getViewport({ scale: scale * ratio });
       target.width = Math.ceil(viewport.width);
@@ -122,6 +122,7 @@ export default function PdfViewer({
   label,
   highlightsResult = true,
   actions,
+  loadPdf,
 }: {
   domain: Domain;
   documentId: string;
@@ -129,6 +130,7 @@ export default function PdfViewer({
   label: string;
   highlightsResult?: boolean;
   actions?: ReactNode;
+  loadPdf?: (signal: AbortSignal) => Promise<Blob>;
 }) {
   const [page, setPage] = useState(initialPage);
   const [attempt, retry] = useState(0);
@@ -140,7 +142,7 @@ export default function PdfViewer({
     let task: ReturnType<typeof getDocument> | undefined;
 
     async function load() {
-      const blob = await provider.pdf(domain, documentId, controller.signal);
+      const blob = await (loadPdf ? loadPdf(controller.signal) : provider.pdf(domain, documentId, controller.signal));
       const data = await blob.arrayBuffer();
       controller.signal.throwIfAborted();
       task = getDocument({ data, useSystemFonts: true });
@@ -172,7 +174,7 @@ export default function PdfViewer({
       if (url) URL.revokeObjectURL(url);
       void task?.destroy().catch(() => undefined);
     };
-  }, [domain, documentId, initialPage, attempt]);
+  }, [domain, documentId, initialPage, attempt, loadPdf]);
 
   const current = state?.attempt === attempt ? state : undefined;
   if (current?.error) {

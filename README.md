@@ -29,6 +29,11 @@ All document identifiers contain the domain prefix (e.g. solar:D001).
 Sources use 1-based PDF page numbers.
 The original PDF paths are registered locally; PDF files, private datasets, API keys and local state are not committed.
 
+Private browser uploads are available for Solar and RAG. They are disabled by
+default and require a server-side bearer token and two dedicated storage
+directories. Uploaded files have status `stored` until scientific processing is
+explicitly implemented. See the [Windows upload setup](docs/DEMO_RUNBOOK.md#приватная-загрузка-pdf).
+
 ## Next sprint steps
 
 1. Execute OCR on RAG D002 page 8 and visually review its table.

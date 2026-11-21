@@ -7,6 +7,7 @@ import { PdfPane } from '../components/PdfPane';
 import { ScientificReview } from '../components/ReviewSection';
 import { SearchInput } from '../components/SearchInput';
 import { PageHeading, WorkspacePage } from '../components/Shell';
+import { UploadPanel } from '../components/UploadPanel';
 import { DataError } from '../data';
 import { emptyFilters, publicationId } from '../domain';
 import { useData } from '../hooks/useData';
@@ -16,7 +17,9 @@ import type { Section } from '../navigation';
 import { provider } from '../provider';
 import { publicationDecision, publicationScope } from '../review';
 
-export function DocumentsPage({ query }: { query: string }) {
+export function DocumentsPage({ query, uploadToken, setUploadToken }: {
+  query: string; uploadToken: string; setUploadToken: (token: string) => void;
+}) {
   const load = useCallback((signal: AbortSignal) => provider.documents(undefined, signal), []);
   const data = useData(load);
   const { state: issueState } = useReviewIssues();
@@ -27,6 +30,7 @@ export function DocumentsPage({ query }: { query: string }) {
       title="Документы"
       subtitle="Реестр PDF, готовность страниц и очередь распознавания."
     >
+      <UploadPanel token={uploadToken} setToken={setUploadToken} />
       <div className="toolbar short">
         <SearchInput
           value={query}

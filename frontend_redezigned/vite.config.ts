@@ -27,7 +27,7 @@ export default defineConfig(({ mode }) => {
         { find: /^@passport(?=\?|$)/, replacement: existsSync(rootPassport) ? rootPassport : localPassport },
       ],
     },
-    server: { proxy },
+    server: { proxy, fs: { allow: [__dirname, rootPassport] } },
     preview: { proxy },
   };
 });
