@@ -42,6 +42,82 @@ def rag_pdf(path):
     )
 
 
+def rag_multilevel_pdf(path, first_model, second_model, *, axis="Method", axis_baseline=92, second_center=377.5,
+                       caption="Table 1: We compare generators across QA datasets; retriever: Qwen-Embed"):
+    def model_parts(parts, center):
+        widths = [pymupdf.get_text_length(part) for part in parts]
+        gap = 6.5
+        left = center - (sum(widths) + gap * (len(parts) - 1)) / 2
+        placed = []
+        for part, width in zip(parts, widths, strict=True):
+            placed.append((left + width / 2, part))
+            left += width + gap
+        return placed
+
+    leaves = (130, 175, 220, 265, 310, 355, 400, 445)
+    return make_table_pdf(path, caption, [
+        (66, "", model_parts(first_model, 197.5) + model_parts(second_model, second_center)),
+        (79, "", list(zip((152.5, 242.5, 332.5, 422.5), ("AtlasQA", "DeltaQA") * 2))),
+        (axis_baseline, axis, []),
+        (92, "", list(zip(leaves, ("EM", "F1") * 4))),
+        (108, "GPT-4o mini", list(zip(leaves, (f".{100 + i}" for i in range(8))))),
+        (123, "Graph RAG", list(zip(leaves, (f".{200 + i}" for i in range(8))))),
+    ])
+
+
+@pytest.mark.parametrize("second_model", [("Mistral v3-8B Instruct",), ("Gemini-2.5", "Flash")])
+def test_rag_multilevel_generator_preserves_source_parts_and_roles(tmp_path, second_model):
+    path = rag_multilevel_pdf(tmp_path / "D001.pdf", ("Gemini-2.5", "Flash"), second_model)
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = {result.raw.value: result for result in store.results("rag")}
+    assert len(results) == 16
+    for row, method in ((100, "GPT-4o mini"), (200, "Graph RAG")):
+        for column in range(8):
+            result = results[f".{row + column}"]
+            model = ("Gemini-2.5", "Flash") if column < 4 else second_model
+            dataset = ("AtlasQA", "DeltaQA")[column // 2 % 2]
+            metric = ("EM", "F1")[column % 2]
+            assert result.extraction_status == "verified"
+            assert result.context["generator_model"] == " ".join(model)
+            assert result.context["rag_variant"] == method
+            assert result.context["retriever_model"] == "Qwen-Embed"
+            assert result.context["dataset_name"] == dataset
+            assert result.metric.name == metric
+            assert result.context["header_path"] == [*model, dataset, metric]
+    left = results[".100"].context["context_evidence"]["generator_model"][1]
+    right = results[".104"].context["context_evidence"]["generator_model"][1]
+    assert left["block_id"] != right["block_id"]
+
+
+@pytest.mark.parametrize(("first_model", "second_model", "options"), [
+    (("GPT-4o", "Gemini-2.5"), ("Claude-3.5 Sonnet",), {}),
+    (("Qwen-Embedding v3",), ("Claude-3.5 Sonnet",), {}),
+    (("Gemini-2.5", "Flash"), ("Claude-3.5 Sonnet",), {
+        "second_center": 339,
+        "caption": "Table 1: We evaluate methods across QA datasets; generator: Gemini-2.5 Flash; dataset: AtlasQA",
+    }),
+    (("Gemini-2.5 Flash",), ("Claude-3.5 Sonnet",), {
+        "caption": "Table 1: We evaluate two retrievers on QA datasets with a fixed generator across all methods.",
+    }),
+    (("Gemini-2.5 Flash",), ("Claude-3.5 Sonnet",), {"axis": "Retriever"}),
+    (("Gemini-2.5 Flash",), ("Claude-3.5 Sonnet",), {"axis": "Retriever model", "axis_baseline": 73}),
+])
+def test_rag_ambiguous_or_retriever_header_requires_review(tmp_path, first_model, second_model, options):
+    path = rag_multilevel_pdf(tmp_path / "D001.pdf", first_model, second_model, **options)
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = {result.raw.value: result for result in store.results("rag")}
+    assert len(results) == 16
+    for column in range(8 if options else 4):
+        result = results[f".{100 + column}"]
+        assert result.extraction_status == "needs_review"
+        assert "generator_model" not in result.context
+        assert result.note == "rag_context_unresolved"
+    if not options:
+        assert results[".104"].extraction_status == "verified"
+
+
 def mock_model(monkeypatch, first_response):
     calls = []
     settings = GigaChatSettings(credentials=SecretStr("fixtureKey=="))
