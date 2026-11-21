@@ -71,6 +71,19 @@ def test_batch_tracks_sha_ocr_idempotence_and_failure(tmp_path):
     assert len({r.result_id for r in solar_results}) == 2
 
 
+def test_rag_schema_update_reuses_legacy_solar_checkpoint(tmp_path, monkeypatch):
+    path = make_pdf(tmp_path / "D001.pdf")
+    store = Store(tmp_path / "state")
+    with monkeypatch.context() as legacy:
+        legacy.setitem(batch.SCHEMA_VERSIONS, "solar", "batch-evidence-7")
+        first = run_batch(store, [path], "solar", local_only=True)
+
+    assert first["requests_this_run"]
+    resumed = run_batch(store, [path], "solar", local_only=True)
+    assert not resumed["requests_this_run"]
+    assert resumed["documents"] == first["documents"]
+
+
 def test_interruption_resumes_fragments_and_uses_hash_cache(tmp_path):
     path = make_pdf(tmp_path / "D001.pdf")
     sibling = path.with_name("D999.pdf")

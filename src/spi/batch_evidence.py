@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSIONS = {"solar": "batch-evidence-9", "rag": "batch-evidence-10"}
+SCHEMA_VERSIONS = {"solar": "batch-evidence-7", "rag": "batch-evidence-10"}
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
