@@ -14,10 +14,11 @@ from .gigachat_evidence import Block, _NUMBER
 CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)\s*(?:[.:|–—]|$)", re.I)
 CELL = re.compile(rf"({_NUMBER})(?:\s*(±\s*{_NUMBER}))?(?:\s*(%|[A-Za-zµμΩΩ][\wµμ²^/ ()⁻−-]*))?")
 RECORD = re.compile(rf"\(({_NUMBER})\)")
-LAYOUT_VERSION = f"batch-layout-9/pymupdf-{pymupdf.VersionBind}"
+LAYOUT_VERSION = f"batch-layout-10/pymupdf-{pymupdf.VersionBind}"
 UNIT_ONLY = re.compile(r"^\([^()]+\)\s*[↑↓]?$")
 SCAN_AXES = {"scan direction", "sweep direction"}
 SCAN_DIRECTIONS = {"forward", "reverse", "average"}
+RETRIEVER_AXES = {"retriever", "retriever model", "retrieval method", "encoder", "reranker"}
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class Cell:
     headers: tuple[Block, ...]
     aggregation: str | None = None
     row_axis: Block | None = None
+    model_header_unresolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,7 +53,8 @@ class Fragment:
             "table_cells": [
                 {"cell": cell.value.block_id, "row": [b.block_id for b in cell.row],
                  "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation,
-                 "row_axis": cell.row_axis.block_id if cell.row_axis else None}
+                 "row_axis": cell.row_axis.block_id if cell.row_axis else None,
+                 **({"model_header_unresolved": True} if cell.model_header_unresolved else {})}
                 for cell in self.cells
             ],
         }
@@ -147,7 +150,7 @@ def _ruled(page, caption, tables):
     return cells
 
 
-def _aligned_groups(labels, leaves):
+def _aligned_groups(labels, leaves, *, position=center):
     if len(labels) < 2 or len(leaves) % len(labels):
         return None
     size = len(leaves) // len(labels)
@@ -155,9 +158,37 @@ def _aligned_groups(labels, leaves):
     groups = [label for label in labels for _ in range(size)]
     for i, label in enumerate(labels):
         group = leaves[i*size:(i+1)*size]
-        if abs(center(label) - (group[0] + group[-1]) / 2) > pitch * .65:
+        if abs(position(label) - (group[0] + group[-1]) / 2) > pitch * .65:
             return None
     return groups
+
+
+def _qa_model_groups(labels, columns, datasets, pitch):
+    # A gap on the same baseline can split a printed model name into PDF blocks.
+    groups = []
+    for block in sorted(labels, key=lambda label: label.bbox[0]):
+        if groups:
+            previous = groups[-1][-1]
+            gap = block.bbox[0] - previous.bbox[2]
+            height = min(b.bbox[3] - b.bbox[1] for b in (previous, block))
+            if 0 <= gap <= height / 2:
+                groups[-1].append(block)
+                continue
+        groups.append([block])
+
+    expanded = _aligned_groups(groups, columns, position=lambda group: (group[0].bbox[0] + group[-1].bbox[2]) / 2)
+    if expanded is None:
+        return None
+    size = len(columns) // len(groups)
+    for start, group in zip(range(0, len(columns), size), groups, strict=True):
+        end = start + size
+        # Each parent must fit inside its columns and must not cut through a dataset.
+        left = (columns[start - 1] + columns[start]) / 2 if start else columns[0] - pitch / 2
+        right = (columns[end - 1] + columns[end]) / 2 if end < len(columns) else columns[-1] + pitch / 2
+        if (group[0].bbox[0] < left or group[-1].bbox[2] > right
+                or (start and datasets[start - 1] == datasets[start])):
+            return None
+    return expanded
 
 
 def _scan_rows(bands, caption):
@@ -236,6 +267,8 @@ def _borderless(caption, lines, support):
     first_band, first_y, first_row, columns = grid[0]
     levels = []
     leaf_candidates = []
+    model_groups = None
+    model_header_unresolved = False
     row_axis = None
     pitch = median(b - a for a, b in zip(columns, columns[1:]))
     for y, row in reversed(bands[:first_band]):
@@ -245,6 +278,9 @@ def _borderless(caption, lines, support):
         if caption in labels:
             break
         if not labels:
+            if (levels and row_axis is None and len(row) == 1 and row[0].text.casefold() in RETRIEVER_AXES
+                    and abs(row[0].bbox[0] - first_row[0].bbox[0]) <= 8):
+                row_axis = row[0]
             continue
         if not levels and len(labels) == 1:
             continue
@@ -259,6 +295,13 @@ def _borderless(caption, lines, support):
             levels.append(labels)
             first_y = y
         elif levels:
+            if (len(levels) == 2 and len(labels) > 1
+                    and re.search(r"\bdatasets?\b", " ".join(b.text for b in support), re.I)
+                    and all(re.fullmatch(r"(?:EM|F[- ]?1)(?:\s*\(%\))?", b.text, re.I) for b in leaf_candidates)
+                    and len(set(levels[0])) < len(columns)):
+                model_groups = _qa_model_groups(labels, columns, levels[0], pitch)
+                model_header_unresolved = model_groups is None
+                break
             # A single metric may sit immediately above an otherwise unit-only leaf.
             if len(labels) == 1:
                 candidates = [j for j, leaf in enumerate(leaf_candidates)
@@ -285,6 +328,9 @@ def _borderless(caption, lines, support):
         or any(abs(row[0].bbox[0] - first_row[0].bbox[0]) > 8 for _, _, row, _ in grid)
     ):
         return []
+    header_paths = [tuple(level[j] for level in levels if level[j]) for j in range(len(columns))]
+    if model_groups:
+        header_paths = [(*model, *path) for model, path in zip(model_groups, header_paths, strict=True)]
     cells = []
     group = None
     prior_band = max(-1, first_band - 2)
@@ -293,8 +339,8 @@ def _borderless(caption, lines, support):
             if len(intermediate) == 1 and not _number(intermediate[0]) and center(intermediate[0]) > columns[0] + pitch:
                 group = intermediate[0]
         row_path = (group, row[0]) if group else (row[0],)
-        cells.extend(Cell(cell, row_path, tuple(level[j] for level in levels if level[j]), row_axis=row_axis)
-                     for j, cell in enumerate(row[1:]))
+        cells.extend(Cell(cell, row_path, headers, row_axis=row_axis, model_header_unresolved=model_header_unresolved)
+                     for cell, headers in zip(row[1:], header_paths, strict=True))
         prior_band = row_band
     return cells
 

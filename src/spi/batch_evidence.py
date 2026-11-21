@@ -11,13 +11,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .batch_pdf import CAPTION, CELL, RECORD, UNIT_ONLY, Fragment
+from .batch_pdf import CAPTION, CELL, RECORD, RETRIEVER_AXES, UNIT_ONLY, Fragment
 from .csv_schema import load_schema
 from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-6"
+SCHEMA_VERSION = "batch-evidence-7"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -62,6 +62,11 @@ RECALL_SECTION_REFERENCE = re.compile(
 )
 SECTION_HEADING = re.compile(r"(?P<number>\d+(?:\.\d+)+)\s+[A-Z][^\n]{1,100}")
 MODEL_NAME = r"(?:Llama|Qwen|GPT|Mistral|Gemini|T5|Claude|DeepSeek|Gemma|Phi)[\w.-]*"
+GENERATOR_HEADER = re.compile(
+    rf"{MODEL_NAME}(?:\s+(?:[vr]?\d[\w.-]*|plus|mini|nano|micro|small|medium|large|base|pro|flash|"
+    r"turbo|instruct|chat|distill|preview|thinking|sonnet|haiku|opus))*", re.I,
+)
+RETRIEVER_HEADER = re.compile(r"\b(?:retrievers?|rerankers?|encoders?|embed(?:der|ding)?s?)\b", re.I)
 JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
 
@@ -306,6 +311,29 @@ def _table_origin(cell, fragment):
     return "unknown", ()
 
 
+def _rag_header_context(cell, caption, axis, label):
+    headers = [b.text for b in cell.headers if not UNIT_ONLY.fullmatch(b.text)]
+    if len(headers) < 3 or not label or not re.search(r"\bdatasets?\b", caption, re.I):
+        return {}
+    if axis in RETRIEVER_AXES or axis in {"generator", "generator model", "llm backbone"}:
+        return {}
+    *model_parts, dataset, _ = headers
+    if (not re.fullmatch(r"[\w][\w.-]*", dataset) or metric_label(dataset, "rag")
+            or GENERATOR_HEADER.fullmatch(fold(dataset)) or RETRIEVER_HEADER.search(dataset)):
+        return {}
+    result = {"dataset_name": dataset}
+    model = " ".join(" ".join(model_parts).split())
+    # A model-shaped label alone cannot distinguish a generator from a retriever.
+    answer_comparison = label[0] in _UNITLESS_RAG_SCORES and re.search(r"\bQA\b|question answering", caption, re.I)
+    generator_comparison = re.search(r"\b(?:generators|llm backbones)\b", caption, re.I)
+    comparison_caption = re.sub(r"(?:^|[;\n])\s*retriever(?: model)?\s*[:=][^;\n]+", "", caption, flags=re.I)
+    retriever_comparison = RETRIEVER_HEADER.search(comparison_caption)
+    if ((answer_comparison or generator_comparison) and not retriever_comparison
+            and not RETRIEVER_HEADER.search(fold(model)) and GENERATOR_HEADER.fullmatch(fold(model))):
+        result["generator_model"] = model
+    return result
+
+
 def _table_context(cell, fragment, domain):
     row = cell.row[-1].text
     headers = [b.text for b in cell.headers]
@@ -399,16 +427,20 @@ def _table_context(cell, fragment, domain):
     else:
         if axis in {"generator", "generator model", "llm backbone"}:
             result.setdefault("generator_model", row)
-        elif axis not in {"model", "model type", "encoder", "retriever", "reranker", "dataset", "benchmark"}:
+        elif axis not in RETRIEVER_AXES and axis not in {"model", "model type", "dataset", "benchmark"}:
             result.setdefault("rag_variant", row)
+        header_context = _rag_header_context(cell, caption, axis, label)
         pairs = re.findall(rf"(?i:\bon\s+){re.escape(result.get('dataset_name', ''))}"
                            rf"\s+(?i:using|with)\s+({MODEL_NAME})(?![\w.-])", caption_text)
-        if result.get("dataset_name") and len(set(pairs)) == 1:
+        if result.get("dataset_name") and len(set(pairs)) == 1 and not header_context.get("generator_model"):
             result.setdefault("generator_model", pairs[0].rstrip("."))
-        if len(headers) == 3 and re.search(r"\bdatasets?\b", caption, re.I):
-            if re.fullmatch(MODEL_NAME, headers[0], re.I):
-                result.setdefault("generator_model", headers[0])
-                result.setdefault("dataset_name", headers[1])
+        for field, value in header_context.items():
+            if field in result and fold(result[field]) != fold(value):
+                result.pop(field)
+            else:
+                result[field] = value
+        if cell.model_header_unresolved:
+            result.pop("generator_model", None)
     if re.search(r"multi-hop QA", caption, re.I):
         result["task_type"] = "multi-hop QA"
     return result
