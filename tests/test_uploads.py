@@ -100,7 +100,9 @@ def test_all_operations_require_bearer(private_uploads, headers):
     assert all(not path.exists() for path in private_uploads.values())
 
 
-@pytest.mark.parametrize("value", ["A" * 31, " " + "A" * 32, "A" * 31 + "!", "а" * 32])
+@pytest.mark.parametrize("value", [
+    "A" * 31, " " + "A" * 32, "A" * 31 + "!", "а" * 32, "=" * 32, "A" * 16 + "=" + "B" * 16,
+])
 def test_malformed_or_short_token(private_uploads, monkeypatch, value):
     monkeypatch.setenv("SPI_UPLOAD_TOKEN", value)
     response = TestClient(app).get("/uploads", headers=TOKEN)

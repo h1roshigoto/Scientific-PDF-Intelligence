@@ -54,7 +54,7 @@ def _overlap(first: set[Path], second: set[Path]) -> bool:
 
 def upload_token() -> str:
     token = os.getenv("SPI_UPLOAD_TOKEN", "")
-    if not re.fullmatch(r"[A-Za-z0-9._~+/=-]{32,}", token):
+    if len(token) < 32 or not re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token):
         raise ValueError("Invalid private upload token")
     return token
 
