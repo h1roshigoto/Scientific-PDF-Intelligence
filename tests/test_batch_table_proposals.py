@@ -118,6 +118,29 @@ def test_rag_ambiguous_or_retriever_header_requires_review(tmp_path, first_model
         assert results[".104"].extraction_status == "verified"
 
 
+@pytest.mark.parametrize("comparison", [
+    "We compare retrieval backbones across multiple QA datasets using EM and F1 scores.",
+    "We evaluate reranking strategies across multiple QA datasets using EM and F1 scores.",
+    "We compare prompt strategies across multiple QA datasets using EM and F1 scores.",
+    "We compare methods across multiple QA datasets with a fixed generator and report EM and F1.",
+])
+def test_rag_qa_scores_do_not_make_non_generator_columns_generators(tmp_path, comparison):
+    path = rag_multilevel_pdf(
+        tmp_path / "D001.pdf", ("Gemini-2.5", "Flash"), ("Claude-3.5 Sonnet",),
+        caption=f"Table 1: {comparison}",
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = store.results("rag")
+    assert len(results) == 16
+    for result in results:
+        assert result.extraction_status == "needs_review"
+        assert result.note == "rag_context_unresolved"
+        assert "generator_model" not in result.context
+        assert result.context["dataset_name"] in {"AtlasQA", "DeltaQA"}
+        assert result.context["rag_variant"] in {"GPT-4o mini", "Graph RAG"}
+
+
 def mock_model(monkeypatch, first_response):
     calls = []
     settings = GigaChatSettings(credentials=SecretStr("fixtureKey=="))

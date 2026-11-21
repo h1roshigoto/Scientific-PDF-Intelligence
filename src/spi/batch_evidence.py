@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-7"
+SCHEMA_VERSION = "batch-evidence-8"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -67,6 +67,15 @@ GENERATOR_HEADER = re.compile(
     r"turbo|instruct|chat|distill|preview|thinking|sonnet|haiku|opus))*", re.I,
 )
 RETRIEVER_HEADER = re.compile(r"\b(?:retrievers?|rerankers?|encoders?|embed(?:der|ding)?s?)\b", re.I)
+NON_GENERATOR_COMPARISON = re.compile(
+    r"\b(?:compar\w*|evaluat\w*|test\w*)\s+(?:(?:different|alternative|several|two)\s+)?"
+    r"(?:retrieval (?:methods?|models?|backbones?|strategies?)|reranking|"
+    r"prompt(?:ing)? (?:methods?|strategies?|variants?))\b", re.I,
+)
+FIXED_GENERATOR = re.compile(
+    r"\b(?:fixed|same|shared)\s+(?:generator|llm backbone)\b"
+    r"|\b(?:generator|llm backbone)(?: model)?\s+(?:is\s+)?(?:held\s+|kept\s+)?fixed\b", re.I,
+)
 JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
 
@@ -327,8 +336,10 @@ def _rag_header_context(cell, caption, axis, label):
     answer_comparison = label[0] in _UNITLESS_RAG_SCORES and re.search(r"\bQA\b|question answering", caption, re.I)
     generator_comparison = re.search(r"\b(?:generators|llm backbones)\b", caption, re.I)
     comparison_caption = re.sub(r"(?:^|[;\n])\s*retriever(?: model)?\s*[:=][^;\n]+", "", caption, flags=re.I)
-    retriever_comparison = RETRIEVER_HEADER.search(comparison_caption)
-    if ((answer_comparison or generator_comparison) and not retriever_comparison
+    role_conflict = (RETRIEVER_HEADER.search(comparison_caption)
+                     or NON_GENERATOR_COMPARISON.search(comparison_caption)
+                     or FIXED_GENERATOR.search(comparison_caption))
+    if ((answer_comparison or generator_comparison) and not role_conflict
             and not RETRIEVER_HEADER.search(fold(model)) and GENERATOR_HEADER.fullmatch(fold(model))):
         result["generator_model"] = model
     return result
