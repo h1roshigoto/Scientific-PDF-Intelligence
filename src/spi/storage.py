@@ -83,8 +83,12 @@ class Store:
         self.write(Path("batch") / domain / f"{publication}.json", record)
 
     def publication_scopes(self) -> dict[tuple[str, str], PublicationScope]:
-        return {(row.document_id, row.pdf_sha256): row for row in
-                map(PublicationScope.model_validate, self.read("publication_scopes.json"))}
+        rows = self.read("publication_scopes.json")
+        scopes = {(row.document_id, row.pdf_sha256): row for row in
+                  map(PublicationScope.model_validate, rows)}
+        if len(rows) != len(scopes):
+            raise ValueError("Store contains duplicate scope decisions for the same PDF")
+        return scopes
 
     def _excluded_documents(self, hashes):
         return {document_id for (document_id, digest), scope in self.publication_scopes().items()
