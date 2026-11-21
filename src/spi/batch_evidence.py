@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-7"
+SCHEMA_VERSIONS = {"solar": "batch-evidence-7", "rag": "batch-evidence-10"}
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -67,6 +67,16 @@ GENERATOR_HEADER = re.compile(
     r"turbo|instruct|chat|distill|preview|thinking|sonnet|haiku|opus))*", re.I,
 )
 RETRIEVER_HEADER = re.compile(r"\b(?:retrievers?|rerankers?|encoders?|embed(?:der|ding)?s?)\b", re.I)
+NON_GENERATOR_COMPARISON = re.compile(
+    r"\b(?:compar\w*|evaluat\w*|test\w*)\s+(?:(?:the|different|alternative|several|two)\s+)?"
+    r"(?:(?P<retriever_model>retrieval (?:methods?|models?|backbones?|strategies?)|retrievers?)|"
+    r"(?P<retrieval_method>(?:retrieval\s*(?:/\s*|and\s+))?rerank(?:ing|ers?))|"
+    r"(?P<prompt_strategy>prompt(?:ing)? (?:methods?|strategies?|variants?)))\b", re.I,
+)
+FIXED_GENERATOR = re.compile(
+    r"\b(?:fixed|same|shared)\s+(?:generator|llm backbone)\b"
+    r"|\b(?:generator|llm backbone)(?: model)?\s+(?:is\s+)?(?:held\s+|kept\s+)?fixed\b", re.I,
+)
 JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
 
@@ -327,8 +337,10 @@ def _rag_header_context(cell, caption, axis, label):
     answer_comparison = label[0] in _UNITLESS_RAG_SCORES and re.search(r"\bQA\b|question answering", caption, re.I)
     generator_comparison = re.search(r"\b(?:generators|llm backbones)\b", caption, re.I)
     comparison_caption = re.sub(r"(?:^|[;\n])\s*retriever(?: model)?\s*[:=][^;\n]+", "", caption, flags=re.I)
-    retriever_comparison = RETRIEVER_HEADER.search(comparison_caption)
-    if ((answer_comparison or generator_comparison) and not retriever_comparison
+    role_conflict = (RETRIEVER_HEADER.search(comparison_caption)
+                     or NON_GENERATOR_COMPARISON.search(comparison_caption)
+                     or FIXED_GENERATOR.search(comparison_caption))
+    if ((answer_comparison or generator_comparison) and not role_conflict
             and not RETRIEVER_HEADER.search(fold(model)) and GENERATOR_HEADER.fullmatch(fold(model))):
         result["generator_model"] = model
     return result
@@ -680,6 +692,17 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             "reranking": {"dataset_name", "retrieval_method"},
         }.get(context.get("experiment_type"), {"rag_variant", "generator_model", "dataset_name"})
         missing = required - context.keys()
+        if name in _UNITLESS_RAG_SCORES and "generator_model" in context and "experiment_type" not in context:
+            # A caption can name fixed models without grounding the varying model for this cell.
+            caption = _support_caption(fragment)
+            varying_roles = {match.lastgroup or "experiment_type"
+                             for match in NON_GENERATOR_COMPARISON.finditer(caption)}
+            if not varying_roles and FIXED_GENERATOR.search(caption):
+                dataset = fold(context.get("dataset_name", ""))
+                headers = [fold(b.text) for b in cell.headers if not UNIT_ONLY.fullmatch(b.text)]
+                if any(header != dataset for header in headers[:-1]):
+                    varying_roles.add("experiment_type")
+            missing.update(varying_roles)
         if missing:
             errors.append("rag_context_unresolved")
             unconfirmed.update(dict.fromkeys(sorted(missing), "The table does not establish this experimental role."))
@@ -719,7 +742,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         note=" | ".join(dict.fromkeys(errors)) if errors else None,
         extraction_metadata=ExtractionMetadata(
             model_id=model_id, method="pymupdf_gigachat_json_schema" if model_id != "local"
-            else "pymupdf_verified_table", pdf_sha256=digest, schema_version=SCHEMA_VERSION,
+            else "pymupdf_verified_table", pdf_sha256=digest, schema_version=SCHEMA_VERSIONS[domain],
             profile=PROFILES[domain], source_block_id=proposal.block,
         ),
     )
