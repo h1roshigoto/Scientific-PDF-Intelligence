@@ -1,0 +1,5 @@
+publication_id,result_id,experiment_id,config_id,dataset_id,task_id,metric_group,metric_name,metric_variant,metric_direction,metric_k,metric_value,metric_unit,baseline_value,aggregation,sample_size,raw_value,raw_unit,normalized_value,normalized_unit,result_origin,cited_publication_id,source_page,source_section,source_table,source_figure,source_fragment,extraction_status,duplicate_of,note
+D001,demo-rag-d001-em,,,,,,EM,,,,0.25,fraction,,,,0.250,fraction,0.25,fraction,primary,,6,,Table 1,,RA-CoT | EM | 0.250,extracted,,Синтетические данные для проверки интерфейса.
+D001,demo-rag-d001-f1,,,,,,F1,,,,,,,,,0.40,,,,primary,,6,,Table 1,,RA-CoT | F1 | 0.40,extracted,,Синтетические данные для проверки интерфейса.
+D002,demo-rag-d002-mean,,,,,,Mean,,,,,,,,,0.50,,,,primary,,8,,Table II,,OCR demo | Mean | 0.50,extracted,,Синтетические данные для проверки интерфейса.
+D002,demo-rag-d002-sd,,,,,,SD,,,,,,,,,0.05,,,,primary,,8,,Table II,,OCR demo | SD | 0.05,extracted,,Синтетические данные для проверки интерфейса.

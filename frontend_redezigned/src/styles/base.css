@@ -1,0 +1,51 @@
+/* Tokens. Голос инструмента — Golos Text, голос статьи (цитаты, значения из PDF) — PT Serif. */
+:root {
+  color-scheme: light;
+  --font-ui: 'Golos Text Variable', 'Golos Text', system-ui, sans-serif;
+  --font-paper: 'PT Serif', Georgia, 'Times New Roman', serif;
+  --paper: #eceff3;      /* стол */
+  --sheet: #fbfcfd;      /* лист */
+  --ink: #12234a;        /* чернила */
+  --ink-soft: #4a5878;
+  --rule: #d3d9e3;
+  --wash: #f2f4f8;
+  --cobalt: #2447b2;     /* Solar: кремниевая ячейка */
+  --plum: #6b2f6f;       /* RAG */
+  --mark: #ffe45c;       /* маркер: только для найденного значения */
+  --red-pen: #b8322a;
+  --green-pen: #1b7048;
+  --amber-pen: #8a5a00;
+  --track: var(--cobalt);
+  --r-control: 6px;
+  --r-tag: 3px;
+  --r-sheet: 2px;
+}
+:root[data-track='rag'] { --track: var(--plum); }
+
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--paper); }
+body { margin: 0; min-width: 0; font: 400 .9375rem/1.5 var(--font-ui); color: var(--ink); background: var(--paper); font-synthesis: none; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4, p, dl, dd, figure { margin: 0; }
+h1 { font-size: 1.75rem; line-height: 1.2; letter-spacing: -.02em; font-weight: 650; text-wrap: balance; }
+h2 { font-size: 1.0625rem; line-height: 1.3; font-weight: 650; }
+h3 { font-size: .9375rem; font-weight: 650; }
+a { color: var(--track); text-underline-offset: .2em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .45; }
+:focus-visible { outline: 2px solid var(--track); outline-offset: 2px; border-radius: 2px; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 20px 0; }
+ul { margin: 0; padding: 0; list-style: none; }
+[hidden] { display: none !important; }
+.muted { color: var(--ink-soft); }
+.num { font-variant-numeric: tabular-nums; }
+.strong { font-weight: 650; }
+.sr-only, .skip-link:not(:focus) { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.skip-link:focus { position: fixed; z-index: 10; top: 8px; left: 8px; padding: 10px 14px; background: var(--sheet); border: 2px solid var(--ink); border-radius: var(--r-control); }
+.icon { display: inline-block; width: var(--icon-size); height: var(--icon-size); flex: 0 0 var(--icon-size); background: currentColor; mask: var(--icon) center / contain no-repeat; }
+
+/* Всё, что процитировано из PDF, набрано шрифтом статьи. */
+blockquote, .metric-display, .result-values dd { font-family: var(--font-paper); }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; } }
