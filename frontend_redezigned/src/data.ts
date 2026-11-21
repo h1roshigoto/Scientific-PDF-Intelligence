@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { belongsTo, csvFiles, documentSchema, issueSchema, resultSchema } from './domain';
+import { belongsTo, csvFiles, documentSchema, domainSchema, issueSchema, resultSchema } from './domain';
 import type { Domain, Issue, Result, ScientificDocument } from './domain';
 import { passportFilename, passportQuery } from './project-passport';
 import type { PassportExport } from './project-passport';
@@ -19,7 +19,7 @@ export interface Provider {
 }
 
 export class DataError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly status?: number) {
     super(message);
     this.name = 'DataError';
   }
@@ -38,16 +38,20 @@ async function readPdf(response: Response) {
   return blob.slice(0, blob.size, 'application/pdf');
 }
 
-function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readonly<Record<number, string>> = {}) {
+function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readonly<Record<number, string>> = {},
+  detailMessages?: Readonly<Record<string, string>>) {
   async function request<T>(url: string, signal: AbortSignal, read: (response: Response) => Promise<T>, init?: RequestInit) {
     const timeout = AbortSignal.timeout(timeoutMs);
     try {
       const response = await fetcher(url, { ...init, signal: AbortSignal.any([signal, timeout]) });
       if (!response.ok) {
-        const message = statusMessages[response.status] ?? (response.status === 404
+        const body: unknown = detailMessages && (await response.json().catch(() => null));
+        const detail = body && typeof body === 'object' && 'detail' in body ? body.detail : null;
+        const message = (typeof detail === 'string' && detailMessages && Object.hasOwn(detailMessages, detail)
+          ? detailMessages[detail] : undefined) ?? statusMessages[response.status] ?? (response.status === 404
           ? 'Запрошенный файл или запись недоступны.'
           : `Сервер вернул ошибку HTTP ${response.status}.`);
-        throw new DataError(message);
+        throw new DataError(message, response.status);
       }
       return await read(response);
     } catch (error) {
@@ -59,18 +63,7 @@ function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readon
   }
 
   function json<T>(url: string, schema: z.ZodType<T>, signal: AbortSignal, init?: RequestInit) {
-    return request(url, signal, async (response) => {
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch (error) {
-        if (!(error instanceof SyntaxError)) throw error;
-        throw new DataError('Ответ сервера содержит некорректный JSON.');
-      }
-      const data = schema.safeParse(body);
-      if (!data.success) throw new DataError('Ответ сервера не соответствует контракту данных.');
-      return data.data;
-    }, init);
+    return request(url, signal, (response) => readJson(response, schema), init);
   }
 
   function pdf(url: string, signal: AbortSignal) {
@@ -90,6 +83,91 @@ function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readon
     });
   }
   return { request, json, pdf, csv };
+}
+
+async function readJson<T>(response: Response, schema: z.ZodType<T>) {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new DataError('Ответ сервера содержит некорректный JSON.');
+  }
+  const data = schema.safeParse(body);
+  if (!data.success) throw new DataError('Ответ сервера не соответствует контракту данных.');
+  return data.data;
+}
+
+const uploadSchema = z.object({
+  upload_id: z.string().regex(/^[a-f0-9]{32}$/),
+  domain: domainSchema,
+  original_filename: z.string().min(1).max(255),
+  size_bytes: z.number().int().positive(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  page_count: z.number().int().positive(),
+  status: z.literal('stored'),
+  created_at: z.iso.datetime({ offset: true }),
+});
+export type StoredUpload = z.infer<typeof uploadSchema>;
+
+const uploadDetails = {
+  uploads_disabled: 'Загрузка PDF выключена на сервере.',
+  uploads_misconfigured: 'Приватная загрузка недоступна. Проверьте настройки сервера.',
+  upload_too_large: 'Размер PDF превышает установленный на сервере предел.',
+  upload_quota_full: 'Хранилище заполнено. Достигнут предел количества загрузок.',
+  empty_pdf: 'Выбранный PDF пуст.',
+  missing_pdf_signature: 'Файл не содержит сигнатуру PDF.',
+  encrypted_pdf: 'Зашифрованные PDF не поддерживаются.',
+  invalid_pdf: 'PDF повреждён или не содержит страниц.',
+  upload_storage_error: 'Сервер не смог выполнить операцию с хранилищем. Повторите попытку.',
+};
+
+export function createUploadClient(fetcher = fetch) {
+  const endpoint = '/api/uploads';
+  const http = client(fetcher, 120_000, {
+    401: 'Неверный токен доступа.',
+    503: 'Приватная загрузка сейчас недоступна.',
+  }, uploadDetails);
+  const privateRequest = (token: string): RequestInit => ({
+    cache: 'no-store', credentials: 'omit', redirect: 'error',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+  return {
+    async list(token: string, signal: AbortSignal) {
+      try {
+        return await http.request(endpoint, signal, async (response) => {
+          const maxBytes = Number(response.headers.get('X-SPI-Upload-Max-Bytes'));
+          if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+            throw new DataError('Сервер не сообщил допустимый размер PDF.');
+          }
+          const records = await readJson(response, z.array(uploadSchema));
+          return { kind: 'authorized' as const, records, maxBytes };
+        }, privateRequest(token));
+      } catch (error) {
+        if (error instanceof DataError) {
+          if (error.status === 401) return { kind: 'locked' as const, rejected: Boolean(token) };
+          if (error.status === 503 || error.status === 404) {
+            return { kind: 'unavailable' as const, message: error.status === 404
+              ? 'Сервер не поддерживает загрузку PDF.' : error.message };
+          }
+        }
+        throw error;
+      }
+    },
+    create(file: File, domain: Domain, token: string, signal: AbortSignal) {
+      const body = new FormData();
+      body.set('file', file);
+      body.set('domain', domain);
+      return http.request(endpoint, signal, (response) => {
+        if (response.status !== 201) throw new DataError('Сервер не подтвердил сохранение PDF.');
+        return readJson(response, uploadSchema);
+      }, { ...privateRequest(token), method: 'POST', body });
+    },
+    pdf(id: string, token: string, signal: AbortSignal) {
+      return http.request(`${endpoint}/${encodeURIComponent(id)}/file`, signal, readPdf, privateRequest(token));
+    },
+  };
 }
 
 function scoped<T extends { domain: Domain }>(schema: z.ZodType<T>, domain?: Domain) {

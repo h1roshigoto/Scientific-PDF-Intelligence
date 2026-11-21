@@ -4,7 +4,6 @@ import { Feedback, LoadBoundary } from '../components/Feedback';
 import { Note } from '../components/Note';
 import { FilterSelect, SearchInput } from '../components/SearchInput';
 import { WorkspacePage } from '../components/Shell';
-import { UploadPanel } from '../components/UploadPanel';
 import {
   emptyFilters,
   filterResults,
@@ -217,7 +216,7 @@ export function ResultsPage({
       title="Результаты"
       subtitle="Научные показатели с контекстом измерения и привязкой к страницам PDF."
     >
-      <UploadPanel />
+      <Link className="button upload-panel" href={sectionUrl('documents')}>Загрузить PDF</Link>
       <LoadBoundary {...data}>
         {({ rows, documents }) => {
           const issues = reviews.state.kind === 'ready' ? reviews.state.data : [];

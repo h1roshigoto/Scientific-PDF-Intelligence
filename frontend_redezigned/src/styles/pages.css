@@ -79,15 +79,17 @@ blockquote mark { color: inherit; padding: 0 2px; margin: 0 -2px; background: li
 .ocr-caution { margin-top: 4px; color: var(--amber-pen); }
 .passport-feedback { margin-top: 12px; }
 .upload-panel { margin-bottom: 16px; }
-.upload-panel summary { padding: 12px 16px; }
-.upload-content { padding: 14px 16px; border-top: 1px solid var(--rule); }
-.upload-form, .upload-retry { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.upload-content { padding: 14px 16px; }
+.upload-form, .upload-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
 .upload-form label { display: grid; min-width: 0; gap: 6px; font-weight: 600; }
-.upload-form input { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid var(--rule); border-radius: var(--r-control); font-weight: 400; background: var(--sheet); }
-.upload-content > p, .upload-retry { margin-top: 8px; }
-.upload-queue { max-height: 340px; margin-top: 12px; overflow: auto; }
-.upload-queue li { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: 6px 14px; padding: 10px 0; border-top: 1px solid var(--rule); }
-.upload-queue-info { min-width: 0; overflow-wrap: anywhere; }
+.upload-form :is(input, select) { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid var(--rule); border-radius: var(--r-control); font-weight: 400; background: var(--sheet); }
+.upload-content p, .upload-actions { margin-top: 8px; }
+.upload-list { margin: 12px 0 0; padding: 0; }
+.upload-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 0; border-top: 1px solid var(--rule); }
+.upload-record { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+.upload-record p { margin-top: 2px; }
+.upload-preview { margin-top: 16px; }
+.upload-preview > button { margin-bottom: 8px; }
 .not-found-actions { margin-top: 16px; }
 
 /* Адаптив */

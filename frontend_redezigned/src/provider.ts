@@ -1,4 +1,4 @@
-import { createApiProvider } from './data';
+import { createApiProvider, createUploadClient } from './data';
 import { createMockProvider } from './mock';
 
 const passportPath = import.meta.env.VITE_PROJECT_PASSPORT_PATH?.trim() || 'export/project-passport.pdf';
@@ -10,3 +10,5 @@ const passport = runId && /^[\w/.-]+\.pdf$/.test(passportPath)
 export const provider = import.meta.env.DEV && import.meta.env.VITE_DATA_SOURCE === 'mock'
   ? createMockProvider({ base: `${import.meta.env.BASE_URL}demo` })
   : createApiProvider({ base: import.meta.env.VITE_API_BASE || '/api', csvBase: import.meta.env.VITE_CSV_ARTIFACT_BASE, passport });
+
+export const uploadClient = provider.mode === 'api' ? createUploadClient() : undefined;

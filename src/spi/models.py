@@ -1,4 +1,5 @@
 """Internal API contract. Official submission CSV column names come from the supplied templates."""
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -7,6 +8,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 Domain = Literal["solar", "rag"]
 ExtractionStatus = Literal["extracted", "needs_review", "verified"]
 ScopeStatus = Literal["in_scope", "out_of_scope", "needs_review"]
+UPLOAD_ID_PATTERN = r"^[a-f0-9]{32}$"
+
+
+class StoredUpload(BaseModel):
+    """Technical metadata for an original in the private upload store."""
+
+    upload_id: str = Field(pattern=UPLOAD_ID_PATTERN)
+    domain: Domain
+    original_filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    page_count: int = Field(gt=0)
+    status: Literal["stored"] = "stored"
+    created_at: datetime
 
 
 class PublicationScope(BaseModel):

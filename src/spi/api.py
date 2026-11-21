@@ -1,4 +1,4 @@
-"""Read API; no fabricated scientific extraction results."""
+"""Scientific read API and private PDF uploads."""
 import logging
 import os
 from datetime import datetime, timezone
@@ -13,9 +13,12 @@ from .project_passport import (
     AmbiguousPublication, PublicationNotFound, passport_filename, render_project_passport,
 )
 from .storage import Store
+from .upload_api import router as upload_router
+from .upload_store import mupdf_lock
 
 load_project_env()
 app = FastAPI(title="Scientific PDF Intelligence API", version="0.1.0")
+app.include_router(upload_router)
 logger = logging.getLogger(__name__)
 origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
 if origins:
@@ -90,9 +93,10 @@ def project_passport(
     generated_at = datetime.now(timezone.utc)
     filename = passport_filename(run_id, domain, publication_id)
     try:
-        content = render_project_passport(store(), run_id=run_id, domain=domain,
-                                          publication_id=publication_id, generated_at=generated_at,
-                                          version=app.version)
+        with mupdf_lock:
+            content = render_project_passport(store(), run_id=run_id, domain=domain,
+                                              publication_id=publication_id, generated_at=generated_at,
+                                              version=app.version)
     except PublicationNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     except AmbiguousPublication as exc:
