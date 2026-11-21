@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-5"
+SCHEMA_VERSION = "batch-evidence-6"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -56,6 +56,11 @@ RECALL_DEFINITION = re.compile(
     r"\brecall\s*@\s*k\s*(?:is|denotes)\s+(?:defined\s+as\s+)?(?:the\s+)?"
     r"(?:fraction|proportion)\s+of\s+(?:all\s+)?relevant\s+documents\b.{0,100}\btop\s+k(?:\b|(?=results\b))"
 )
+RECALL_SECTION_REFERENCE = re.compile(
+    r"\brecall\s*@\s*k\s*\(?\s*(?:as\s+)?(?:defined|introduced)\s+in\s+section\s+"
+    r"(\d+(?:\.\d+)*)(?=[\s,;.)]|$)(?!\.\d)"
+)
+SECTION_HEADING = re.compile(r"(?P<number>\d+(?:\.\d+)+)\s+[A-Z][^\n]{1,100}")
 MODEL_NAME = r"(?:Llama|Qwen|GPT|Mistral|Gemini|T5|Claude|DeepSeek|Gemma|Phi)[\w.-]*"
 JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
@@ -135,6 +140,35 @@ def _block_ref(block):
             "bbox": block.bbox, "text": block.text}
 
 
+def _recall_scale_support(table, references, definitions, prose):
+    section_refs = {
+        section: block for block in references if set(TABLE_REFERENCE.findall(fold(block.text))) == {table}
+        for section in RECALL_SECTION_REFERENCE.findall(fold(block.text))
+    }
+    candidates = []
+    table_scope = re.compile(rf"(?:for|in) table\s+{re.escape(table)}\b,?\s+")
+    for definition in definitions:
+        text = fold(definition.text)
+        tables = set(TABLE_REFERENCE.findall(text))
+        sentences = re.split(r"(?<=[.!?])\s+(?=[a-z])", text)
+        if tables == {table} and any(
+            (scope := table_scope.match(sentence)) and RECALL_DEFINITION.match(sentence, scope.end())
+            for sentence in sentences
+        ):
+            candidates.append((definition,))
+        elif not tables and any(RECALL_DEFINITION.match(re.sub(r"^mathematically,\s*", "", sentence))
+                                for sentence in sentences):
+            # Only attach a lookup in a named section when the definition is directly under its heading.
+            headings = [(match["number"], block) for block in prose[_page_number(definition)]
+                        if 0 <= definition.bbox[1] - block.bbox[3] <= 24
+                        and abs(definition.bbox[0] - block.bbox[0]) <= 8
+                        and (match := SECTION_HEADING.fullmatch(block.text.strip()))]
+            if len(headings) == 1 and headings[0][0] in section_refs:
+                section, heading = headings[0]
+                candidates.append((definition, heading, section_refs[section]))
+    return candidates[0] if len(candidates) == 1 else ()
+
+
 def link_table_context(fragments, pages, domain):
     prose = {}
     definitions = []
@@ -145,6 +179,7 @@ def link_table_context(fragments, pages, domain):
         prose[number] = blocks
         definitions.extend(b for b in blocks if domain == "rag" and RECALL_DEFINITION.search(fold(b.text)))
     linked = {}
+    recall_scales = {}
     for fragment in fragments:
         table = TABLE_REFERENCE.fullmatch(fragment.location or "")
         if not fragment.cells or not table:
@@ -165,12 +200,17 @@ def link_table_context(fragments, pages, domain):
                     if _linked_procedure(witness, key[1]):
                         references.extend(witness)
             linked[key] = tuple(dict.fromkeys(references))
-        terms = definitions if domain == "rag" and any(
-            _table_metric(c, domain) and _table_metric(c, domain)[0] == "recall" for c in fragment.cells
-        ) else []
         references = linked[key]
-        yield replace(fragment, blocks=(*fragment.blocks, *references, *terms),
-                      table_references=references, metric_definitions=tuple(terms))
+        scale_support = ()
+        if domain == "rag" and any(
+            (label := _table_metric(cell, domain)) and label[0] == "recall" and label[1] is not None
+            for cell in fragment.cells
+        ):
+            if key not in recall_scales:
+                recall_scales[key] = _recall_scale_support(key[1], references, definitions, prose)
+            scale_support = recall_scales[key]
+        yield replace(fragment, blocks=tuple(dict.fromkeys((*fragment.blocks, *references, *scale_support))),
+                      table_references=references, metric_scale_support=scale_support)
 
 
 def _linked_procedure(blocks, table):
@@ -552,13 +592,11 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         if spread and "aggregation" not in context:
             errors.append("aggregation_unresolved")
             unconfirmed["aggregation"] = "The table does not identify the statistic accompanying the value."
-        if not unit and name == "recall" and k is not None and context.get("experiment_type") and len(
-            fragment.metric_definitions
-        ) == 1:
-            definition = fragment.metric_definitions[0]
+        if (not unit and name == "recall" and k is not None and context.get("experiment_type")
+                and fragment.metric_scale_support):
             scale = "fraction"
-            context_evidence["metric_scale"] = [_block_ref(definition)]
-            geometry.append(definition)
+            context_evidence["metric_scale"] = [_block_ref(b) for b in fragment.metric_scale_support]
+            geometry.extend(fragment.metric_scale_support)
         origin_text = _support_caption(fragment)
         origin, proof = _table_origin(cell, fragment)
         if proof:
@@ -620,7 +658,10 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         normalized = normalize(proposal.raw_value, scale, name, domain)
     except EvidenceError as exc:
         errors.append(str(exc))
-        unconfirmed["metric_scale"] = str(exc)
+        unconfirmed["metric_scale"] = (
+            "No scale is printed for this cell or established by a definition linked to its table."
+            if fragment.cells and name == "recall" and k is not None and not scale else str(exc)
+        )
     _facts(proposal, [origin_text, *(b.text for b in geometry)], domain, context, errors)
     if proposal.facts:
         context["proposed_facts"] = proposal.facts

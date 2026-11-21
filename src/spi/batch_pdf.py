@@ -39,7 +39,7 @@ class Fragment:
     location: str | None = None
     caption_support: tuple[Block, ...] = ()
     table_references: tuple[Block, ...] = ()
-    metric_definitions: tuple[Block, ...] = ()
+    metric_scale_support: tuple[Block, ...] = ()
     caption_has_reference: bool = False
 
     def payload(self):
@@ -47,7 +47,7 @@ class Fragment:
             "pdf_page": self.page, "location": self.location,
             "blocks": [asdict(block) for block in self.blocks],
             "table_references": [b.block_id for b in self.table_references],
-            "metric_definitions": [b.block_id for b in self.metric_definitions],
+            "metric_scale_support": [b.block_id for b in self.metric_scale_support],
             "table_cells": [
                 {"cell": cell.value.block_id, "row": [b.block_id for b in cell.row],
                  "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation,

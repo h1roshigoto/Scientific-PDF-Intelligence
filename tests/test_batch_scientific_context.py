@@ -2,14 +2,18 @@ import pymupdf
 import pytest
 
 from spi import batch
-from spi.models import PublicationScope
+from spi.batch_checks import quality_gate
+from spi.models import Evidence, ExtractionMetadata, Metric, PublicationScope, ResultRecord, Value
 from spi.storage import Store
 
 
-def _pdf(path, caption, rows, *, prose=(), definition=None):
+def _pdf(path, caption, rows, *, prose=(), definition=None, definition_heading=None):
     with pymupdf.open() as pdf:
         if definition:
-            pdf.new_page().insert_textbox((40, 45, 520, 120), definition, fontsize=9)
+            page = pdf.new_page()
+            if definition_heading:
+                page.insert_text((40, 35), definition_heading, fontsize=10)
+            page.insert_textbox((40, 45, 520, 120), definition, fontsize=9)
         page = pdf.new_page()
         page.insert_text((40, 45), caption, fontsize=9)
         for y, cells in rows:
@@ -21,11 +25,23 @@ def _pdf(path, caption, rows, *, prose=(), definition=None):
     return path
 
 
-@pytest.mark.parametrize("definition", [
-    "Recall@k is defined as the proportion of relevant documents returned among the top k results.",
-    None,
+RECALL = "recall@k is defined as the proportion of relevant documents returned among the top k results."
+
+
+@pytest.mark.parametrize(("definition", "definition_heading", "section_reference", "verified"), [
+    (None, None, "", False),
+    (RECALL.capitalize(), None, "", False),
+    ("For Table 12, " + RECALL, None, "", False),
+    ("For Table 8, " + RECALL, None, "", True),
+    (RECALL.capitalize(), "2.2 Performance Measurement", " (defined in Section 2.2)", True),
+    (RECALL.capitalize(), "2.2 Performance Measurement", " (defined in Section 2.3)", False),
+    ("For Table 12, " + RECALL, "2.2 Performance Measurement", " (defined in Section 2.2)", False),
+    ("For a separate reranker experiment, " + RECALL, "2.2 Performance Measurement",
+     " (defined in Section 2.2)", False),
 ])
-def test_component_retrieval_uses_linked_prose_and_a_defined_scale(tmp_path, definition):
+def test_component_retrieval_uses_linked_prose_and_a_defined_scale(
+    tmp_path, definition, definition_heading, section_reference, verified,
+):
     path = _pdf(
         tmp_path / "component.pdf",
         "Table 8: Performance of semantic search for embedding models on ArchiveQA.",
@@ -33,10 +49,12 @@ def test_component_retrieval_uses_linked_prose_and_a_defined_scale(tmp_path, def
          (90, [(40, "Encoder-A"), (154, "0.41"), (225, "0.52")]),
          (105, [(40, "Encoder-B"), (154, "0.46"), (225, "0.59")])],
         prose=[
-            (135, "We evaluate embedding models on ArchiveQA using recall@k. Table 8 reports our results."),
+            (135, f"We evaluate embedding models on ArchiveQA using recall@k{section_reference}. "
+                  "Table 8 reports our results."),
             (205, "In Table 12 we use generator Answer-7B and retrieval top-k: 20."),
         ],
         definition=definition,
+        definition_heading=definition_heading,
     )
     store = Store(tmp_path / "state")
     batch.run_batch(store, [path], "rag", local_only=True)
@@ -46,13 +64,15 @@ def test_component_retrieval_uses_linked_prose_and_a_defined_scale(tmp_path, def
     assert result.context["retriever_model"] == "Encoder-A"
     assert "generator_model" not in result.context and "top_k" not in result.context
     assert result.raw.unit is None
-    if definition:
+    if verified:
         assert result.extraction_status == "verified" and result.normalized.unit == "fraction"
         assert result.source.origin == "primary"
         assert result.context["context_evidence"]["metric_scale"][0]["page"] == 1
     else:
         assert result.extraction_status == "needs_review"
         assert "metric_scale" in result.context["unconfirmed_context"]
+        assert "metric_scale" not in result.context["context_evidence"]
+        assert result.normalized.value is None
 
 
 def test_calibration_mean_keeps_spread_and_delta_requires_a_metric(tmp_path):
@@ -153,3 +173,34 @@ def test_quality_gate_zero_results_can_coexist_with_structural_export(tmp_path):
     assert submission.quality_gate["unresolved"] == 4
     details = [d for f in store.batch_documents("solar")[0]["fragments"].values() for d in f["review_details"]]
     assert {d["code"] for d in details} == {"ambiguous_header", "unknown_metric"}
+
+
+def test_quality_gate_excludes_results_and_checkpoints_from_another_pdf_version():
+    document_id = "solar:Versioned"
+    current_hash, old_hash = "a" * 64, "b" * 64
+    stale = ResultRecord(
+        result_id="old", document_id=document_id, domain="solar", metric=Metric(name="PCE"),
+        raw=Value(value="11.5", unit="%"), normalized=Value(value="11.5", unit="%"),
+        source=Evidence(page=1, table="Table 1", fragment="11.5", origin="primary"),
+        extraction_status="verified",
+        extraction_metadata=ExtractionMetadata(
+            model_id="local", method="pymupdf_verified_table", pdf_sha256=old_hash,
+            schema_version="test", profile="solar",
+        ),
+    )
+    stale_review = stale.model_copy(update={"result_id": "old-review", "extraction_status": "needs_review"})
+    checkpoints = [{"document_id": document_id, "sha256": old_hash, "pending_units": 5}]
+    in_scope = {document_id: current_hash}
+
+    gate = quality_gate(in_scope, [stale, stale_review], checkpoints)
+    assert gate["status"] == "NO-GO"
+    assert gate["publications_without_verified_results"] == ["Versioned"]
+    assert gate["verified_results"] == gate["needs_review"] == gate["unresolved"] == 0
+
+    current = stale.model_copy(update={
+        "result_id": "current",
+        "extraction_metadata": stale.extraction_metadata.model_copy(update={"pdf_sha256": current_hash}),
+    })
+    gate = quality_gate(in_scope, [stale, stale_review, current], checkpoints)
+    assert gate["status"] == "GO" and gate["publications_with_verified_results"] == 1
+    assert gate["verified_results"] == 1 and gate["needs_review"] == gate["unresolved"] == 0
