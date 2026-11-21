@@ -10,7 +10,7 @@ from pathlib import Path
 from .batch_checks import quality_gate
 from .csv_export import PDF_ID, Submission, SubmissionError, export_submission
 from .csv_schema import SubmissionSchema, load_schema
-from .models import ResultRecord, ValidationIssue
+from .models import PublicationScope, ResultRecord, ValidationIssue
 from .storage import Store
 
 
@@ -90,6 +90,8 @@ def _issue_rows(issue: ValidationIssue, exported_results, included):
 
 def project_submission(
     store: Store, schema: SubmissionSchema, pdf_dir: Path, *, publication_ids: Sequence[str],
+    reviewed_scopes: dict[tuple[str, str], PublicationScope] | None = None,
+    require_ready: bool = False,
 ) -> Submission:
     tables = {name: [] for name in schema.tables}
     selected = set(publication_ids)
@@ -101,8 +103,11 @@ def project_submission(
             if path.stem in pdfs:
                 raise SubmissionError(f"Multiple PDFs match {path.stem} in {pdf_dir}")
             pdfs[path.stem] = path
-    documents = {d["publication_id"]: d for d in store.documents() if d["domain"] == schema.domain}
-    scopes = store.publication_scopes()
+    track_docs = [d for d in store.documents() if d["domain"] == schema.domain]
+    documents = {d["publication_id"]: d for d in track_docs}
+    if len(documents) != len(track_docs):
+        raise SubmissionError(f"{schema.domain}: duplicate publication registrations")
+    scopes = store.publication_scopes() if reviewed_scopes is None else reviewed_scopes
     included = {}
     for pid in publication_ids:
         document_id = f"{schema.domain}:{pid}"
@@ -112,6 +117,8 @@ def project_submission(
         doc = documents.get(pid)
         if doc is None:
             raise SubmissionError(f"Selected PDF {document_id} has not been imported into SPI")
+        if doc["document_id"] != document_id:
+            raise SubmissionError(f"Selected PDF {document_id} has a conflicting document ID")
         digest = sha256(pdf.read_bytes()).hexdigest()
         if doc.get("sha256") != digest:
             raise SubmissionError(f"Selected PDF {document_id} does not match the imported SHA-256")
@@ -129,6 +136,11 @@ def project_submission(
 
     exported_results = {}
     results = store.results(schema.domain)
+    checkpoints = store.batch_documents(schema.domain)
+    issues = list(store.issue_entries(schema.domain))
+    gate = release_quality({key: doc["sha256"] for key, doc in included.items()}, results, checkpoints, issues)
+    if require_ready and not gate["release_ready"]:
+        raise SubmissionError(f"{schema.domain} scientific release gate is blocked: {json.dumps(gate)}")
     for result in results:
         doc = included.get(result.document_id)
         metadata = result.extraction_metadata
@@ -138,35 +150,63 @@ def project_submission(
         pid = doc["publication_id"]
         exported_results[result.result_id] = result.document_id
         source = result.source
+        if source.page > doc["page_count"]:
+            raise SubmissionError(f"{result.result_id}: result source page is outside the registered PDF")
         notes = [result.note, result.context.get("note")]
         raw_scan = result.context.get("raw_scan_direction")
         if raw_scan:
             notes.append(f"Published scan direction: {raw_scan}")
         if schema.domain == "rag" and source.column:
             notes.append(f"Table header path: {source.column}")
+        if schema.domain == "rag" and result.context.get("experiment_type"):
+            notes.append(f"Experiment type: {result.context['experiment_type']}")
         if schema.domain == "rag" and result.context.get("aggregation") == "mean":
             spread = result.context.get("published_spread")
             notes.append(f"Published mean ({spread} standard deviation)" if spread else "Published mean")
         if result.context.get("metric_definition"):
             notes.append(f"Metric definition: {result.context['metric_definition']}")
+        metric = result.normalized if result.normalized.value is not None else result.raw
         tables["results"].append({
             **_related_rows(result, tables, pid, schema),
             "publication_id": pid, "result_id": result.result_id,
-            "metric_name": result.metric.name, "metric_value": result.normalized.value or result.raw.value,
-            "metric_unit": result.normalized.unit or result.raw.unit, "raw_value": result.raw.value, "raw_unit": result.raw.unit,
+            "metric_name": result.metric.name, "metric_value": metric.value, "metric_unit": metric.unit,
+            "raw_value": result.raw.value, "raw_unit": result.raw.unit,
             "normalized_value": result.normalized.value, "normalized_unit": result.normalized.unit,
             "result_origin": source.origin, "cited_publication_id": source.cited_publication_id,
             "source_page": source.page, "source_section": source.section, "source_table": source.table,
             "source_figure": source.figure, "source_fragment": source.fragment, "extraction_status": "extracted",
+            "aggregation": result.context.get("aggregation"),
             "note": " | ".join(filter(None, notes)) or None,
             **({"metric_k": result.metric.k, "metric_variant": result.metric.variant} if schema.domain == "rag"
-               else {"aggregation": result.context.get("aggregation")}),
+               else {}),
         })
-    for issue in store.issues(schema.domain):
+    for _, issue in issues:
         tables["issues"].extend(_issue_rows(issue, exported_results, included))
-    gate = quality_gate({key: doc["sha256"] for key, doc in included.items()},
-                        results, store.batch_documents(schema.domain))
     return Submission(schema.domain, tables, quality_gate=gate)
+
+
+def release_quality(in_scope, results, checkpoints, issues):
+    gate = quality_gate(in_scope, results, checkpoints)
+    current = [row for row in checkpoints if row["document_id"] in in_scope
+               and in_scope[row["document_id"]] == row.get("sha256")]
+    if len(current) != len({row["document_id"] for row in current}):
+        raise SubmissionError("Duplicate current checkpoints for the selected scope")
+    complete = {row["document_id"] for row in current
+                if row.get("status") == "processed" and row.get("pages_needing_ocr") == []
+                and not row.get("retry_parse") and not row.get("errors")}
+    result_owners = {row.result_id: row.document_id for row in results}
+    errors = set()
+    for owner, issue in issues:
+        if issue.severity != "error":
+            continue
+        owners = {owner} if owner else set()
+        owners.update(ref["document_id"] for ref in issue.evidence_refs if ref.get("document_id"))
+        owners.update(result_owners[key] for key in issue.result_ids if key in result_owners)
+        if not owners or owners & in_scope.keys():
+            errors.add(issue.issue_id)
+    incomplete = sorted(in_scope.keys() - complete)
+    return dict(gate, incomplete_checkpoints=incomplete, error_issues=sorted(errors),
+                release_ready=gate["ready"] and not incomplete and not errors)
 
 
 def main() -> None:
@@ -176,7 +216,8 @@ def main() -> None:
     parser.add_argument("--pdf-dir", required=True, type=Path)
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--publication-id", action="append", help="PDF stem to export. Repeat for each selected publication.")
-    selection.add_argument("--all-pdfs", action="store_true", help="Explicitly select all PDFs in --pdf-dir and check every scope")
+    selection.add_argument("--all-pdfs", action="store_true",
+                           help="Select all PDFs in --pdf-dir and require the scientific release gate")
     parser.add_argument("--state", default="state")
     parser.add_argument("--template-dir", type=Path)
     args = parser.parse_args()
@@ -186,7 +227,7 @@ def main() -> None:
             path.stem for path in args.pdf_dir.iterdir() if path.is_file() and path.suffix.lower() == ".pdf"
         )
         submission = project_submission(Store(args.state), schema, args.pdf_dir,
-                                        publication_ids=ids)
+                                        publication_ids=ids, require_ready=args.all_pdfs)
         export_submission(schema, submission, args.output, publication_ids=ids)
         print(json.dumps({"output": str(args.output), "quality_gate": submission.quality_gate}))
     except (OSError, ValueError) as exc:
