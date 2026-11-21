@@ -29,10 +29,12 @@ All document identifiers contain the domain prefix (e.g. solar:D001).
 Sources use 1-based PDF page numbers.
 The original PDF paths are registered locally; PDF files, private datasets, API keys and local state are not committed.
 
-Private browser uploads are available for Solar and RAG. They are disabled by
-default and require a server-side bearer token and two dedicated storage
-directories. Uploaded files have status `stored` until scientific processing is
-explicitly implemented. See the [Windows upload setup](docs/DEMO_RUNBOOK.md#приватная-загрузка-pdf).
+Private browser uploads and local analysis are available for Solar and RAG.
+They require a server-side bearer token and dedicated directories for originals,
+upload metadata and processing. After manual review, the upload page can export
+current approvals in CSV and JSON, a private PDF passport and a ZIP with
+scientific issues, full decision history and offline SHA-256 verification.
+[Windows setup](docs/DEMO_RUNBOOK.md#приватная-загрузка-pdf) · [Private export contract](docs/API_CONTRACT.md#private-project-export-v1)
 
 ## Next sprint steps
 

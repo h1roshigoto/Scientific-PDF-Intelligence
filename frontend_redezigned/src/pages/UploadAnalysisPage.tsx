@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { StatusBadge } from '../components/Badge';
 import { Feedback, LoadBoundary } from '../components/Feedback';
 import { PageHeading } from '../components/Shell';
+import { UploadExport } from '../components/UploadExport';
 import { PrivateUploadAccess } from '../components/UploadPanel';
 import type { UploadCredentials } from '../components/UploadPanel';
 import { UploadStatus } from '../components/UploadProcessing';
@@ -97,7 +98,10 @@ export function UploadAnalysisPage({ uploadId, resultId, ...credentials }: Uploa
             const upload = records.find((row) => row.upload_id === uploadId);
             if (!upload) return <Feedback kind="empty" title="Загрузка не найдена" />;
             const props = { api, upload, token: credentials.token };
-            return resultId ? <UploadResultReview {...props} resultId={resultId} /> : <UploadAnalysis {...props} />;
+            return resultId ? <UploadResultReview {...props} resultId={resultId} /> : <>
+              <UploadAnalysis {...props} />
+              <UploadExport key={upload.upload_id} {...props} />
+            </>;
           }}
         </PrivateUploadAccess>
       ) : <Feedback kind="empty" title="Приватные загрузки недоступны" />}

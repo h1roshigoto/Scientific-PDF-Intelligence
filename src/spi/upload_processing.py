@@ -41,6 +41,17 @@ class UploadProcessingStore(Store):
         records = self.batch_documents(self.upload.domain)
         return records[0] if records and self._matches(records[0]) else None
 
+    def export_source_bytes(self):
+        names = ("documents.json", "results.json", "issues.json",
+                 Path("batch") / self.upload.domain / f"{self.upload.upload_id}.json")
+        size = 0
+        for name in names:
+            try:
+                size += self._path(name).stat().st_size
+            except FileNotFoundError:
+                pass
+        return size
+
     def upload_results(self):
         # The batch verifies source alignment. Human verification of a private
         # record is a separate decision that this worker never makes.

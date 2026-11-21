@@ -145,6 +145,39 @@ const reviewOverviewSchema = z.object({
 export type ReviewDetail = z.infer<typeof reviewDetailSchema>;
 export type ReviewEvent = z.infer<typeof reviewEventSchema>;
 
+const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
+const exportWarning = z.enum([
+  'zero_approved_results', 'scientific_completeness_unverified', 'incomplete_ocr',
+  'local_only', 'partial_analysis', 'unresolved_issues', 'private_not_official_submission',
+]);
+const exportPreviewSchema = z.object({
+  metadata: z.object({
+    format: z.literal('spi-private-project-v1'), upload_id: uploadId, domain: domainSchema,
+    pdf_sha256: sha256, processing_job_id: uploadId,
+    processing_status: z.enum(['needs_review', 'completed', 'failed']),
+    snapshot_sha256: sha256, official_submission: z.literal(false),
+  }),
+  validation: z.object({
+    review_counts: z.object({
+      automatic: count, approved: count, approved_corrected: count, pending: count, correction_proposed: count,
+      rejected: count, stale: count, unconfirmed: count,
+    }),
+    issue_counts: z.object({ total: count }),
+    ocr_pending_pages: z.array(z.number().int().positive()),
+    scientific_completeness: z.literal('unverified'),
+    warnings: z.array(z.object({ code: exportWarning })),
+  }),
+});
+export type UploadExportPreview = z.infer<typeof exportPreviewSchema>;
+
+const exportFiles = {
+  CSV: { route: 'reviewed-results.csv', filename: 'reviewed_results.csv', mime: 'text/csv' },
+  JSON: { route: 'reviewed-results.json', filename: 'reviewed_results.json', mime: 'application/json' },
+  PDF: { route: 'scientific-passport.pdf', filename: 'scientific-passport.pdf', mime: 'application/pdf' },
+  ZIP: { route: 'project.zip', filename: 'project.zip', mime: 'application/zip' },
+};
+export type UploadExportFormat = keyof typeof exportFiles;
+
 const uploadDetails = {
   uploads_disabled: 'Загрузка PDF выключена на сервере.',
   uploads_misconfigured: 'Приватная загрузка недоступна. Проверьте настройки сервера.',
@@ -175,6 +208,13 @@ const uploadDetails = {
   empty_review_correction: 'Измените хотя бы одно научное поле.',
   invalid_review_correction: 'Проверьте исходное значение, единицы и метрику.',
   invalid_review_request: 'Проверьте значения полей, обоснование и указатель на источник.',
+  upload_export_processing_active: 'Идёт анализ PDF. Экспорт будет доступен после его завершения.',
+  upload_export_analysis_unavailable: 'Для экспорта нужен завершённый запуск с сохранёнными результатами анализа.',
+  upload_export_pdf_changed: 'Экспорт недоступен. Оригинал PDF повреждён, отсутствует или его SHA-256 изменился.',
+  upload_export_source_changed: 'Версия анализа или рецензии изменилась. Обновите данные экспорта.',
+  upload_export_invalid_review: 'Экспорт остановлен. Подтверждённая запись не прошла проверку источника.',
+  upload_export_too_large: 'Размер проекта превышает установленный на сервере предел экспорта.',
+  upload_export_storage_error: 'Сервер не смог подготовить экспорт. Повторите попытку.',
 };
 
 export function createUploadClient(fetcher = fetch) {
@@ -262,6 +302,27 @@ export function createUploadClient(fetcher = fetch) {
     reviewHistory(id: string, result: string, token: string, signal: AbortSignal) {
       const schema = reviewEventSchema.refine((event) => event.decision.upload_id === id && event.decision.result_id === result);
       return http.json(`${reviewEndpoint(id, result)}/history`, z.array(schema), signal, privateRequest(token));
+    },
+    exportPreview(upload: StoredUpload, token: string, signal: AbortSignal) {
+      const schema = exportPreviewSchema.refine(({ metadata }) =>
+        metadata.upload_id === upload.upload_id && metadata.domain === upload.domain && metadata.pdf_sha256 === upload.sha256);
+      return http.json(uploadEndpoint(upload.upload_id, 'export/manifest'), schema, signal, privateRequest(token));
+    },
+    downloadExport(preview: UploadExportPreview, format: UploadExportFormat, token: string, signal: AbortSignal) {
+      const { upload_id: id, domain, snapshot_sha256: snapshot } = preview.metadata;
+      const file = exportFiles[format];
+      const init = privateRequest(token);
+      return http.request(uploadEndpoint(id, `export/${file.route}`), signal, async (response) => {
+        if (response.headers.get('Content-Type')?.split(';')[0] !== file.mime
+          || response.headers.get('X-SPI-Snapshot-SHA256') !== snapshot) {
+          throw new DataError('Полученный файл не соответствует выбранному формату или версии проекта.');
+        }
+        const blob = format === 'PDF' ? await readPdf(response) : await response.blob();
+        if (!blob.size || (format === 'ZIP' && await blob.slice(0, 4).text() !== 'PK\x03\x04')) {
+          throw new DataError('Сервер вернул пустой или повреждённый файл.');
+        }
+        return { blob, filename: format === 'ZIP' ? `spi-project-${domain}-${id}.zip` : file.filename };
+      }, { ...init, headers: { ...init.headers, 'X-SPI-Snapshot-SHA256': snapshot } });
     },
   };
 }

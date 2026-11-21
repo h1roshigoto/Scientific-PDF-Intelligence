@@ -201,8 +201,119 @@ the source. A repeated POST with an already used revision returns `409`.
 `422` covers invalid input or scientific evidence. `401`, `404` and `503` use
 the private upload authentication, lookup and configuration rules. The reviewed
 projection omits pending, proposed, rejected and stale decisions. Review does
-not change extraction status, publication scope or release readiness. CSV export
-of reviewed records belongs to P0 №29.
+not change extraction status, publication scope or release readiness.
+
+### Private project export v1
+
+All routes below use the authenticated private upload store. Send the bearer
+token in the `Authorization` header. The token grants access to the configured
+store. It neither identifies individual users nor authenticates reviewer labels.
+Responses use `Cache-Control: no-store`. Keep downloaded data in a private location.
+
+| GET under `/uploads/{upload_id}/export/` | Response |
+| --- | --- |
+| `manifest` | JSON preview with capture metadata, counts, limitations and available downloads. Checksums are computed when the ZIP is built. |
+| `reviewed-results.csv` | `text/csv; charset=utf-8` attachment `reviewed_results.csv` |
+| `reviewed-results.json` | `application/json` attachment `reviewed_results.json` |
+| `scientific-passport.pdf` | `application/pdf` attachment from the private snapshot |
+| `project.zip` | `application/zip` attachment `spi-project-<domain>-<upload_id>.zip` |
+
+Send the preview's `metadata.snapshot_sha256` as `X-SPI-Snapshot-SHA256` on
+download requests to pin the version. Each download echoes the captured
+fingerprint in the response header. Without a pin, a request captures the
+latest eligible snapshot. The fingerprint covers catalog metadata and all
+captured scientific and audit data. The UTC export timestamp is separate and
+can differ across requests for the same version.
+
+The API streams the original once to verify its registered SHA-256 and checks
+its PDF structure and page count before capture. It then reserves the queue
+transaction, rechecks the job and original identity, and reads the results,
+issues, processing and full review log in queue → reviews order. The queue
+reservation ends before validation and rendering. All artifacts in a ZIP use
+that captured snapshot even if a newer review commits during rendering.
+Active jobs, missing analysis data, changed originals, changed job or pinned
+versions, and invalid approved records return `409`. Finished failed attempts
+with saved analysis can be exported with their limitations. A finished
+snapshot with no current approvals exports a header-only CSV and an audit
+package with `zero_approved_results`.
+
+#### CSV and JSON
+
+`spi-private-reviewed-results-v1` is comma-separated UTF-8 with a BOM, CRLF
+records and CSV quoting. Rows are unique and sorted by `result_id`. Columns
+appear in this order.
+
+~~~text
+upload_id,domain,document_id,result_id,review_status,review_revision,review_id,
+source_job_id,pdf_sha256,source_result_hash,metric_name,metric_k,metric_variant,
+raw_value,raw_unit,normalized_value,normalized_unit,source_page,source_section,
+source_table,source_figure,source_fragment,source_origin,cited_publication_id,
+context_json,reviewer_label,reviewed_at,review_reason,evidence_mode,warnings_acknowledged,
+source_row,source_column
+~~~
+
+PDF pages are 1-based. Empty cells represent either null or empty text.
+Booleans use `true` and `false`. Text with formula-like prefixes or spreadsheet
+control prefixes is escaped with a leading apostrophe. Existing initial
+apostrophes are doubled. Zero and plain signed-negative scientific numbers keep
+their numeric representation. Use the JSON for fully typed data and exact text.
+`metric_k` is a metric cutoff. Retrieval `top_k` stays in `context_json`.
+
+The three UTF-8 JSON documents have top-level `format` and `snapshot_sha256` fields.
+
+| File | Format | Data |
+| --- | --- | --- |
+| `reviewed_results.json` | `spi-private-reviewed-results-json-v1` | `results` uses the existing `ReviewedResult` model with original and reviewed records, decision, issues and OCR pages. |
+| `issues.json` | `spi-private-issues-json-v1` | `issues` carries rule, severity, linked result IDs, evidence references and reason. `processing` tracks page-level coverage. `review_approval_resolves_issues` is false. |
+| `review_history.json` | `spi-private-review-history-json-v1` | `automatic_results` preserves all current extraction records. `current_reviews` lists the latest effective status per result, including pending and stale. `events` preserves full review events with their original result snapshots and reasons. |
+
+Only applicable `approved` and `approved_corrected` decisions appear in reviewed
+files. In audit history, `current` means the latest decision matches the
+current source, `superseded` means a newer decision replaced it on the current
+source, and `stale` means its job, PDF or result version no longer applies.
+Historical decisions retain their recorded action and status, including
+`rejected` and `correction_proposed`. Acceptance of a record leaves scientific
+issues, OCR gaps and extraction coverage unchanged. Even technical `completed`
+and approval of every current result leave scientific completeness unverified.
+
+#### ZIP integrity and limits
+
+The ZIP contains exactly these files under `spi-project/`.
+
+~~~text
+manifest.json
+README.md
+reviewed_results.csv
+reviewed_results.json
+issues.json
+review_history.json
+scientific-passport.pdf
+~~~
+
+`manifest.json` uses `spi-private-project-v1`. It includes upload and PDF identity,
+processing mode and coverage, UTC export time, application version, review and
+issue counts, OCR pages, completeness warnings, and each of the six other
+members' relative names, byte sizes and SHA-256 digests. The manifest excludes
+its own digest. You may independently compute a checksum of the full ZIP.
+Checksums detect changes and do not establish authorship.
+
+~~~powershell
+python -m spi.upload_export_verify '.\spi-project-solar-<upload_id>.zip'
+~~~
+
+The verifier reads in place without extracting members. Its exit code is `0`
+for PASS and `1` for verification failure. It checks the fixed file inventory,
+entry types, versions, sizes and SHA-256 digests. The source PDF is available
+through the separate authenticated `/file` route. The archive has no official
+submission status. The public Store passport, official 14 CSV files and
+release readiness gate use their existing contracts.
+
+The configurable defaults are `SPI_UPLOAD_EXPORT_MAX_SNAPSHOT_BYTES=16777216`
+for source data and the frozen JSON, `SPI_UPLOAD_EXPORT_MAX_BYTES=33554432` for
+both the expanded package and ZIP response, and `SPI_UPLOAD_EXPORT_MAX_PDF_PAGES=200`.
+The server returns `413` when a limit is exceeded. Set the matching byte limit
+for the verifier if checking an archive produced with a larger limit.
+The PDF marks any shortened field. The JSON preserves full Unicode and content.
 
 ## Project passport
 
