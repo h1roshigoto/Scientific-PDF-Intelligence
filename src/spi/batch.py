@@ -12,10 +12,10 @@ from time import perf_counter
 
 from pydantic import ValidationError
 
-from .batch_checks import validate_results
+from .batch_checks import quality_gate, validate_results
 from .batch_evidence import (
     MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, TableValueMismatch, make_prompt, model_fragments,
-    offline_proposals, relevant, verify,
+    link_table_context, offline_proposals, relevant, unresolved_table_cells, verify,
 )
 from .batch_pdf import LAYOUT_VERSION, page_fragments
 from .gigachat import (
@@ -74,12 +74,15 @@ def report(store, domain, selected=None, *, requests=None):
         review_reasons.update(issue["reason"] for issue in item.get("layout_issues", ()))
         result_statuses.update(r["extraction_status"] for r in results)
         fields.update(k for r in results if r["extraction_status"] == "verified" for k in r["context"]
-                      if k not in {"evidence_blocks", "header_path", "unit_status", "origin_evidence", "proposed_facts"})
+                      if k not in {"evidence_blocks", "header_path", "unit_status", "origin_evidence", "proposed_facts",
+                                   "context_evidence"})
         documents.append(item)
     return {
         "domain": domain, "coverage": {"documents": dict(statuses), "pages": dict(page_statuses),
                                        "results": dict(result_statuses), "verified_context": dict(fields),
                                        "review_reasons": dict(review_reasons)},
+        "quality_gate": quality_gate({d["document_id"]: d["sha256"] for d in documents
+                                      if d["scope"]["status"] == "in_scope"}, store.results(domain), documents),
         "scope_review_queue": [r["document_id"] for r in documents if r["scope"]["status"] == "needs_review"],
         "requests_this_run": requests or [],
         "documents": documents,
@@ -157,7 +160,7 @@ class Generation:
                 event["requested_max_tokens"] = self.completion_max_tokens
             event["elapsed_ms"] = round((perf_counter() - started) * 1000, 2)
 
-        results, issues, review_details = {}, [], []
+        results, issues, review_details, rejected = {}, [], [], []
         for proposal in proposals:
             try:
                 result, errors = verify(proposal, fragment, domain, record["document_id"], record["sha256"], model)
@@ -168,20 +171,26 @@ class Generation:
             except TableValueMismatch as exc:
                 issues.append(str(exc))
                 review_details.append({"code": str(exc), "source_block_id": proposal.block, "fields": exc.fields})
+                rejected.append({"code": str(exc), "proposal": proposal.model_dump(mode="json")})
             except EvidenceError as exc:
                 issues.append(str(exc))
-        if self.complete is None:
-            # Labelled cells without a supported metric stay in the review queue.
-            if len(proposals) < len(fragment.cells):
-                issues.append("unsupported_table_metrics_or_number_format")
-        if completion is not None and not event["cache_hit"] and not issues:
+                rejected.append({"code": str(exc), "proposal": proposal.model_dump(mode="json")})
+        if self.complete is None or not proposals:
+            unresolved = list(unresolved_table_cells(fragment, domain, record["sha256"]))
+            issues.extend(detail["code"] for detail in unresolved)
+            review_details.extend(unresolved)
+            if self.complete is not None and fragment.cells and not unresolved:
+                issues.append("no_supported_proposal")
+        if completion is not None and not event["cache_hit"] and (not issues or not proposals):
             store.write(cache_file, completion.model_dump(mode="json"))
         outcome = {"status": "review" if issues else "done", "page": fragment.page,
                    "location": fragment.location, "results": list(results.values()),
                    "issues": list(dict.fromkeys(issues)),
-                   "review_source": fragment.payload() if issues else None}
+                   "review_source": dict(fragment.payload(), pdf_sha256=record["sha256"]) if issues else None}
         if review_details:
             outcome["review_details"] = review_details
+        if rejected:
+            outcome["rejected_proposals"] = rejected
         return outcome
 
 
@@ -249,6 +258,9 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None)
             layout_issues.extend(unresolved)
 
         metadata, pages = parse_pdf(path, domain, content=content, inspect_page=inspect_page)
+        fragments = list(link_table_context(fragments, pages, domain))
+        for issue in layout_issues:
+            issue["pdf_sha256"] = digest
         store.save_document(metadata, pages)
         record.update(page_count=metadata["page_count"], pages_needing_ocr=metadata["pages_needing_ocr"],
                       pages=[{key: value for key, value in page.items() if key != "blocks"} for page in pages],

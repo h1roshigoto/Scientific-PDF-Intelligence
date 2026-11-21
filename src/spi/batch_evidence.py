@@ -11,19 +11,19 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .batch_pdf import CELL, RECORD, Fragment
+from .batch_pdf import CAPTION, CELL, RECORD, UNIT_ONLY, Fragment
 from .csv_schema import load_schema
-from .gigachat_evidence import EvidenceError, _NUMBER
+from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-4"
+SCHEMA_VERSION = "batch-evidence-5"
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
     "PCE": r"PCE|power conversion efficiency|efficiency",
-    "Voc": r"V[ _]*oc|open.circuit voltage", "Jsc": r"J[ _]*sc|short.circuit current density",
-    "FF": r"FF|fill factor", "EQE": r"EQE|external quantum efficiency",
+    "Voc": r"V[ _]*oc|open.circuit voltage", "Jsc": r"(?:integrated )?J[ _]*sc(?: from (?:IPCE|EQE))?|short.circuit current density",
+    "FF": r"FF|fill factor", "EQE": r"EQE|IPCE|external quantum efficiency",
     "bandgap": r"E[ _]*g|band ?gap", "series resistance": r"R[ _]*s|series resistance",
     "shunt resistance": r"R[ _]*sh|shunt resistance",
 }
@@ -32,7 +32,7 @@ RAG = {
     "accuracy": r"acc(?:uracy)?\.?", "precision": r"precision", "recall": r"recall",
     "MRR": r"MRR|mean reciprocal rank", "MAP": r"MAP|mean average precision",
     "nDCG": r"nDCG", "hit rate": r"hits?|hit rate", "ROUGE-L": r"ROUGE[- ]L",
-    "BLEU": r"BLEU", "latency": r"latency(?: per query)?",
+    "BLEU": r"BLEU", "ECE": r"ECE|expected calibration error", "latency": r"latency(?: per query)?",
 }
 METRICS = {"solar": SOLAR, "rag": RAG}
 _UNITLESS_RAG_SCORES = {"EM", "F1"}
@@ -46,6 +46,18 @@ PROCEDURE = re.compile(
     r"our training complements retrieval augmentation|exhibited PCE\s*=)", re.I | re.S,
 )
 CITED = re.compile(r"\b(?:taken|copied|sourced|quoted|obtained|reported) (?:directly )?(?:from|by)\b", re.I)
+TABLE_REFERENCE = re.compile(r"\bTable\s+([A-Z]?\d+[a-z]?)\b", re.I)
+LINKED_PROCEDURE = re.compile(
+    r"\bwe (?:\w+ ){0,2}(?:use|compar\w*|evaluat\w*|measur\w*|report\w*|run|test\w*)\b"
+    r"|\b(?:J\s*-\s*V|photocurrent density\s*-\s*photovoltage) curves"
+    r"\b.{0,100}\b(?:are|were) (?:illustrated|shown|reported)\b", re.I,
+)
+RECALL_DEFINITION = re.compile(
+    r"\brecall\s*@\s*k\s*(?:is|denotes)\s+(?:defined\s+as\s+)?(?:the\s+)?"
+    r"(?:fraction|proportion)\s+of\s+(?:all\s+)?relevant\s+documents\b.{0,100}\btop\s+k(?:\b|(?=results\b))"
+)
+MODEL_NAME = r"(?:Llama|Qwen|GPT|Mistral|Gemini|T5|Claude|DeepSeek|Gemma|Phi)[\w.-]*"
+JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
 
 class Proposal(BaseModel):
@@ -101,7 +113,7 @@ def fold(text: str) -> str:
 
 
 def metric_label(text, domain):
-    text = UNIT_TAIL.sub("", text.strip()).strip()
+    text = UNIT_TAIL.sub("", unicodedata.normalize("NFKC", text).strip()).strip()
     for metric, aliases in METRICS[domain].items():
         match = re.fullmatch(rf"(?:{aliases})(?:\s*@\s*(\d+))?", text, re.I)
         if match and (not match[1] or domain == "rag"):
@@ -112,6 +124,69 @@ def metric_label(text, domain):
 def relevant(text, domain):
     metric_terms = "|".join(METRICS[domain].values())
     return bool(re.search(rf"(?<!\w)(?:{metric_terms})(?!\w)", text, re.I) and re.search(r"\d", text))
+
+
+def _page_number(block):
+    return int(block.block_id.split("-", 1)[0][1:])
+
+
+def _block_ref(block):
+    return {"block_id": block.block_id, "page": _page_number(block) if re.match(r"p\d+-", block.block_id) else None,
+            "bbox": block.bbox, "text": block.text}
+
+
+def link_table_context(fragments, pages, domain):
+    prose = {}
+    definitions = []
+    for page in pages:
+        number = page["page"]
+        blocks = [Block(f"p{number}-text{i}-0", tuple(b["bbox"]), b["text"])
+                  for i, b in enumerate(page["blocks"])]
+        prose[number] = blocks
+        definitions.extend(b for b in blocks if domain == "rag" and RECALL_DEFINITION.search(fold(b.text)))
+    linked = {}
+    for fragment in fragments:
+        table = TABLE_REFERENCE.fullmatch(fragment.location or "")
+        if not fragment.cells or not table:
+            yield fragment
+            continue
+        key = (fragment.page, table[1].casefold())
+        if key not in linked:
+            references = []
+            for page in range(fragment.page - 1, fragment.page + 2):
+                for block in prose.get(page, ()):
+                    if CAPTION.match(block.text) or key[1] not in TABLE_REFERENCE.findall(fold(block.text)):
+                        continue
+                    # A sentence can be split into adjacent text boxes in a single column.
+                    neighbors = [b for b in prose[page] if 0 <= block.bbox[1] - b.bbox[3] <= 4
+                                 and abs(b.bbox[0] - block.bbox[0]) < 4 and not re.search(r"[.!?]\s*$", b.text)
+                                 and not CAPTION.match(b.text)] if re.match(r"[a-z]", block.text) else []
+                    witness = (*neighbors, block) if len(neighbors) == 1 else (block,)
+                    if _linked_procedure(witness, key[1]):
+                        references.extend(witness)
+            linked[key] = tuple(dict.fromkeys(references))
+        terms = definitions if domain == "rag" and any(
+            _table_metric(c, domain) and _table_metric(c, domain)[0] == "recall" for c in fragment.cells
+        ) else []
+        references = linked[key]
+        yield replace(fragment, blocks=(*fragment.blocks, *references, *terms),
+                      table_references=references, metric_definitions=tuple(terms))
+
+
+def _linked_procedure(blocks, table):
+    text = fold(" ".join(b.text for b in blocks))
+    if CITED.search(text):
+        return False
+    sentences = re.split(r"(?<=[.!?])\s+(?=[a-z])", text)
+    if any(set(TABLE_REFERENCE.findall(sentence)) == {table} and LINKED_PROCEDURE.search(sentence)
+           for sentence in sentences):
+        return True
+    if set(TABLE_REFERENCE.findall(text)) != {table} or not LINKED_PROCEDURE.search(text):
+        return False
+    # Across sentences, tie the publication's procedure to a table reporting those results.
+    reference = rf"\btable\s+{re.escape(table)}\b"
+    return bool(re.search(rf"\b(?:experimental|evaluation) results\s+in\s+{reference}"
+                          rf"|{reference}\s+(?:lists|reports|shows)\s+(?:the|our)\b", text))
 
 
 def _unit_key(unit):
@@ -141,15 +216,19 @@ def normalize(raw_value, raw_unit, metric, domain):
             scales[metric] = {"%": ("%", 1), "fraction": ("fraction", 1), "ratio": ("fraction", 1)}
     if unit not in scales.get(metric, {}):
         raise EvidenceError("unknown_unit_or_scale")
+    if (unit == "%" and not 0 <= value <= 100) or (unit in {"ratio", "fraction"} and not 0 <= value <= 1):
+        raise EvidenceError("value_outside_scale")
     normalized_unit, factor = scales[metric][unit]
     return Value(value=str(value * Decimal(factor)), unit=normalized_unit)
 
 
 def _table_unit(cell):
+    header = UNIT_TAIL.search(cell.headers[-1].text) if cell.headers else None
     if cell.aggregation == "champion" and (record := RECORD.fullmatch(cell.value.text)):
-        return record[1], UNIT_TAIL.search(cell.headers[-1].text)[1], None
+        return record[1], header[1] if header else "", None
     number = CELL.fullmatch(cell.value.text)
-    header = UNIT_TAIL.search(cell.headers[-1].text)
+    if number is None:
+        raise EvidenceError("unsupported_number")
     raw_unit = number[3] or (header[1] if header else "")
     if number[3] and header and _unit_key(number[3]) != _unit_key(header[1]):
         raise EvidenceError("conflicting_units")
@@ -158,7 +237,7 @@ def _table_unit(cell):
 
 def _table_metric(cell, domain):
     for b in reversed(cell.headers):
-        if not b.text.startswith("("):
+        if not UNIT_ONLY.fullmatch(b.text):
             return metric_label(b.text, domain)
     return None
 
@@ -169,6 +248,22 @@ def _origin(text):
     if PROCEDURE.search(text):
         return "primary"
     return "unknown"
+
+
+def _table_origin(cell, fragment):
+    caption = _support_caption(fragment)
+    row = " ".join(b.text for b in cell.row)
+    if _origin(row) == "cited":
+        return "cited", cell.row
+    if fragment.caption_has_reference or re.search(r"\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]", caption + " " + row):
+        return "unknown", ()
+    proof = fragment.caption_support or ((fragment.caption,) if fragment.caption else ())
+    origin = _origin(caption)
+    if origin != "unknown":
+        return origin, proof
+    if fragment.table_references and not re.search(r"\([A-Z][^()]*,\s*(?:19|20)\d\d[a-z]?\)", row):
+        return "primary", fragment.table_references
+    return "unknown", ()
 
 
 def _table_context(cell, fragment, domain):
@@ -186,15 +281,19 @@ def _table_context(cell, fragment, domain):
         axis = fold(cell.row_axis.text) if cell.row_axis else ""
         if axis in {"direction", "scan direction", "sweep direction"}:
             result["raw_scan_direction"] = row
+            if len(cell.row) == 2:
+                result["device_label"] = cell.row[0].text
+                if fold(row) in {"forward", "reverse", "average"}:
+                    result["scan_direction"] = fold(row)
             champion = re.search(r"\bchampion devices?\b.{0,80}?\bbased on (.{1,120}?)\.?$", caption, re.I | re.S)
-            if champion:
+            if champion and len(cell.row) == 1:
                 result.update(device_label=champion[1].strip(), device_role="record", aggregation="champion")
         else:
             result["device_label"] = row
         if cell.aggregation:
             result["aggregation"] = cell.aggregation
         direction = re.findall(r"\b(reverse|forward|average)\s+(?:J.?V\s+)?(?:scan|sweep)", " ".join([caption, *headers, row]), re.I)
-        if len(set(map(str.lower, direction))) == 1:
+        if len(set(map(str.lower, direction))) == 1 and "scan_direction" not in result:
             result["scan_direction"] = direction[0].lower()
         intensity = re.findall(rf"({_NUMBER})\s*mW\s*(?:/\s*cm[²2]|cm\s*[−⁻-]\s*[²2])", caption, re.I)
         if len(set(intensity)) == 1:
@@ -202,7 +301,17 @@ def _table_context(cell, fragment, domain):
         spectrum = re.search(r"\bAM\s*1\.5\s*G\b", caption, re.I)
         if spectrum:
             result["spectrum"] = spectrum[0]
-        if re.search(r"\bJ\s*[–-]\s*V\b", caption, re.I):
+        label = _table_metric(cell, domain)
+        spectral = any(re.search(r"\b(?:IPCE|EQE)\b", fold(h), re.I) for h in headers)
+        if spectral:
+            result["measurement_type"] = "EQE"
+            for field in ("scan_direction", "raw_scan_direction", "light_intensity", "intensity_unit", "spectrum"):
+                result.pop(field, None)
+            if label and label[0] == "Jsc":
+                result["note"] = "Current density integrated from the spectral response."
+        elif (JV.search(fold(caption)) or any(JV.search(fold(b.text)) for b in fragment.table_references)
+              or ("scan_direction" in result and label and label[0] in {"Voc", "Jsc", "FF", "PCE"}
+                  and re.search(r"\b(?:pv|photovoltaic|solar cells?)\b", fold(caption)))):
             result["measurement_type"] = "J-V"
         if fragment.location and fragment.location.lower().startswith("fig"):
             stack = re.search(r"\bconsisting of an?\s+(.{5,150}?)\s+structure\b", caption, re.I | re.S)
@@ -219,6 +328,7 @@ def _table_context(cell, fragment, domain):
             result["note"] = "Figure-caption trace and corresponding prose: " + caption
         return result
     result = _labelled_context(caption, {
+        "rag_variant": r"(?:rag )?(?:method|variant)",
         "retrieval_method": "retrieval method", "retriever_model": "retriever(?: model)?",
         "generator_model": "generator(?: model)?", "dataset_name": "dataset",
         "task_type": "task", "evaluation_protocol": "evaluation protocol",
@@ -226,11 +336,39 @@ def _table_context(cell, fragment, domain):
     })
     if "top_k" in result and not re.fullmatch(r"\d+", result["top_k"]):
         result.pop("top_k")
-    result["rag_variant"] = row
-    if len(headers) == 3 and re.search(r"\bdatasets?\b", caption, re.I):
-        if re.search(r"llama|qwen|gpt|mistral|gemini|t5|instruct|claude|generator|model", headers[0], re.I):
-            result["generator_model"] = headers[0]
-            result["dataset_name"] = headers[1]
+    caption_text = " ".join(unicodedata.normalize("NFKC", caption).split())
+    datasets = re.findall(r"(?i:\bon\s+(?:(?:the )?(?:dataset|benchmark)\s+)?)([A-Z][\w-]*)"
+                          r"(?=\s*(?:(?i:using|with|dataset|benchmark)\b|[.,;]|$))", caption_text)
+    if len(set(datasets)) == 1:
+        result.setdefault("dataset_name", datasets[0])
+    axis = fold(cell.row_axis.text) if cell.row_axis else ""
+    label = _table_metric(cell, domain)
+    component = None
+    if label and label[0] in {"recall", "precision", "MRR", "MAP", "nDCG", "hit rate"} and (
+        axis in {"model type", "model", "method", "encoder", "retriever", "reranker"}
+        and not result.get("generator_model")
+    ):
+        if re.search(r"\bperformance of (?:the )?rerank(?:er|ing)\b", fold(caption)):
+            component = "reranking"
+            result["retrieval_method"] = row
+        elif re.search(r"\b(?:semantic search|text retrieval)\b.{0,65}\b(?:embedding|encoder)\b", fold(caption)):
+            component = "retrieval"
+            result["retriever_model"] = row
+    if component:
+        result["experiment_type"] = component
+    else:
+        if axis in {"generator", "generator model", "llm backbone"}:
+            result.setdefault("generator_model", row)
+        elif axis not in {"model", "model type", "encoder", "retriever", "reranker", "dataset", "benchmark"}:
+            result.setdefault("rag_variant", row)
+        pairs = re.findall(rf"(?i:\bon\s+){re.escape(result.get('dataset_name', ''))}"
+                           rf"\s+(?i:using|with)\s+({MODEL_NAME})(?![\w.-])", caption_text)
+        if result.get("dataset_name") and len(set(pairs)) == 1:
+            result.setdefault("generator_model", pairs[0].rstrip("."))
+        if len(headers) == 3 and re.search(r"\bdatasets?\b", caption, re.I):
+            if re.fullmatch(MODEL_NAME, headers[0], re.I):
+                result.setdefault("generator_model", headers[0])
+                result.setdefault("dataset_name", headers[1])
     if re.search(r"multi-hop QA", caption, re.I):
         result["task_type"] = "multi-hop QA"
     return result
@@ -268,22 +406,41 @@ def _prose_context(text, domain):
 def offline_proposals(fragment, domain):
     proposals = []
     for cell in fragment.cells:
-        label = _table_metric(cell, domain)
-        if label is None:
-            continue
         try:
-            raw_value, raw_unit, _ = _table_unit(cell)
+            proposals.append(_table_proposal(cell, fragment, domain))
         except EvidenceError:
             continue
-        metric, k = label
-        proposals.append(Proposal(
-            cell=cell.value.block_id, row=[b.block_id for b in cell.row],
-            headers=[b.block_id for b in cell.headers], block=cell.value.block_id, quote=cell.value.text,
-            raw_value=raw_value, raw_unit=raw_unit,
-            metric=f"{metric}@{k}" if k is not None else metric,
-            origin=_origin(_support_caption(fragment)), facts={},
-        ))
     return proposals
+
+
+def _table_proposal(cell, fragment, domain):
+    label = _table_metric(cell, domain)
+    if label is None:
+        leaf = next((b.text for b in reversed(cell.headers) if not UNIT_ONLY.fullmatch(b.text)), "")
+        terms = re.split(r"\s*[/,]\s*|\s+and\s+", UNIT_TAIL.sub("", leaf), flags=re.I)
+        ambiguous = not leaf or sum(metric_label(term, domain) is not None for term in terms) > 1
+        code = "ambiguous_header" if ambiguous else "unknown_metric"
+        raise EvidenceError(code)
+    raw_value, raw_unit, _ = _table_unit(cell)
+    metric, k = label
+    return Proposal(
+        cell=cell.value.block_id, row=[b.block_id for b in cell.row],
+        headers=[b.block_id for b in cell.headers], block=cell.value.block_id, quote=cell.value.text,
+        raw_value=raw_value, raw_unit=raw_unit, metric=f"{metric}@{k}" if k is not None else metric,
+        origin=_table_origin(cell, fragment)[0], facts={},
+    )
+
+
+def unresolved_table_cells(fragment, domain, digest):
+    for cell in fragment.cells:
+        try:
+            _table_proposal(cell, fragment, domain)
+        except EvidenceError as exc:
+            yield {"code": str(exc), "component": "metric" if str(exc) in {"ambiguous_header", "unknown_metric"}
+                   else "value_or_unit", "pdf_sha256": digest, "page": fragment.page, "table": fragment.location,
+                   "extraction_status": "needs_review",
+                   "source_block_id": cell.value.block_id, "value": _block_ref(cell.value),
+                   "row": [_block_ref(b) for b in cell.row], "headers": [_block_ref(b) for b in cell.headers]}
 
 
 def make_prompt(fragment, domain):
@@ -346,6 +503,8 @@ def _facts(proposal, support, domain, context, errors):
 
 def verify(proposal, fragment, domain, document_id, digest, model_id):
     errors = []
+    unconfirmed = {}
+    context_evidence = {}
     label = metric_label(proposal.metric, domain)
     if label is None:
         raise EvidenceError("unknown_metric")
@@ -358,6 +517,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
     origin_text = proposal.quote
     row = column = None
     geometry = [source_block]
+    scale = proposal.raw_unit
     if fragment.cells:
         cell = next((cell for cell in fragment.cells if cell.value.block_id == proposal.cell), None)
         if cell is None or cell.value != source_block or proposal.quote != cell.value.text:
@@ -375,9 +535,44 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             geometry.append(cell.row_axis)
         if fragment.caption:
             geometry.extend(fragment.caption_support or (fragment.caption,))
+        geometry.extend(fragment.table_references)
+        context_evidence["metric"] = [_block_ref(b) for b in cell.headers]
+        if domain == "solar" and name == "PCE" and any(
+            fold(UNIT_TAIL.sub("", b.text)) == "efficiency" for b in cell.headers
+        ) and not (
+            context.get("measurement_type") == "J-V"
+            or re.search(r"\b(?:photovoltaic|power conversion|pv performance)\b", fold(_support_caption(fragment)))
+        ):
+            errors.append("solar_metric_context_unresolved")
+            unconfirmed["metric"] = "The generic efficiency header has no confirmed link to power conversion."
         if spread:
             context["published_spread"] = spread
+        if domain == "rag" and re.search(r"\bmean\s*(?:±|\+/-)\s*standard deviation\b", fold(_support_caption(fragment))):
+            context["aggregation"] = "mean"
+        if spread and "aggregation" not in context:
+            errors.append("aggregation_unresolved")
+            unconfirmed["aggregation"] = "The table does not identify the statistic accompanying the value."
+        if not unit and name == "recall" and k is not None and context.get("experiment_type") and len(
+            fragment.metric_definitions
+        ) == 1:
+            definition = fragment.metric_definitions[0]
+            scale = "fraction"
+            context_evidence["metric_scale"] = [_block_ref(definition)]
+            geometry.append(definition)
         origin_text = _support_caption(fragment)
+        origin, proof = _table_origin(cell, fragment)
+        if proof:
+            origin_text = "\n".join(b.text for b in proof)
+            context_evidence["origin"] = [_block_ref(b) for b in proof]
+        caption_blocks = fragment.caption_support or ((fragment.caption,) if fragment.caption else ())
+        for field in ("dataset_name", "generator_model", "experiment_type"):
+            if field in context:
+                context_evidence[field] = [_block_ref(b) for b in (*caption_blocks, *cell.headers)]
+        if "measurement_type" in context:
+            jv_refs = [b for b in fragment.table_references if JV.search(fold(b.text))]
+            context_evidence["measurement_type"] = [_block_ref(b) for b in (*caption_blocks, *cell.headers, *jv_refs)]
+        if "scan_direction" in context:
+            context_evidence["scan_direction"] = [_block_ref(b) for b in (*cell.row, *cell.headers)]
         row = " / ".join(b.text for b in cell.row)
         column = " / ".join(b.text for b in cell.headers)
     else:
@@ -404,23 +599,36 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         context.update(_prose_context(quote, domain))
         if not context:
             errors.append("prose_context_requires_review")
-    origin = _origin(origin_text)
+        origin = _origin(origin_text)
     if origin == "unknown" or origin != proposal.origin:
         errors.append("origin_unresolved")
-    if fragment.cells and domain == "rag" and not {"rag_variant", "generator_model", "dataset_name"} <= context.keys():
-        errors.append("rag_context_unresolved")
+        unconfirmed["origin"] = ("The table or claim does not establish whether the result is primary or cited."
+                                 if origin == "unknown" else "The proposed origin conflicts with the source.")
+    if fragment.cells and domain == "rag":
+        required = {
+            "retrieval": {"dataset_name", "retriever_model"},
+            "reranking": {"dataset_name", "retrieval_method"},
+        }.get(context.get("experiment_type"), {"rag_variant", "generator_model", "dataset_name"})
+        missing = required - context.keys()
+        if missing:
+            errors.append("rag_context_unresolved")
+            unconfirmed.update(dict.fromkeys(sorted(missing), "The table does not establish this experimental role."))
     if fragment.cells and domain == "solar" and "device_label" not in context:
         errors.append("solar_device_unresolved")
+        unconfirmed["device_label"] = "The row does not identify the device for this measurement."
     try:
-        normalized = normalize(proposal.raw_value, proposal.raw_unit, name, domain)
+        normalized = normalize(proposal.raw_value, scale, name, domain)
     except EvidenceError as exc:
         errors.append(str(exc))
+        unconfirmed["metric_scale"] = str(exc)
     _facts(proposal, [origin_text, *(b.text for b in geometry)], domain, context, errors)
     if proposal.facts:
         context["proposed_facts"] = proposal.facts
-    context["evidence_blocks"] = [
-        {"block_id": b.block_id, "bbox": b.bbox, "text": b.text} for b in dict.fromkeys(geometry)
-    ]
+    context["evidence_blocks"] = [_block_ref(b) for b in dict.fromkeys(geometry)]
+    if unconfirmed:
+        context["unconfirmed_context"] = unconfirmed
+    if context_evidence:
+        context["context_evidence"] = context_evidence
     context["header_path"] = [b.text for b in cell.headers] if fragment.cells else []
     context["unit_status"] = "confirmed" if normalized.value is not None else "unconfirmed"
     context["origin_evidence"] = origin_text if origin != "unknown" else None

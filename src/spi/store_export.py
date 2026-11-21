@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 
+from .batch_checks import quality_gate
 from .csv_export import PDF_ID, Submission, SubmissionError, export_submission
 from .csv_schema import SubmissionSchema, load_schema
 from .models import ResultRecord, ValidationIssue
@@ -127,7 +128,8 @@ def project_submission(
             included[document_id] = doc
 
     exported_results = {}
-    for result in store.results(schema.domain):
+    results = store.results(schema.domain)
+    for result in results:
         doc = included.get(result.document_id)
         metadata = result.extraction_metadata
         if (doc is None or result.extraction_status != "verified" or metadata is None
@@ -142,6 +144,9 @@ def project_submission(
             notes.append(f"Published scan direction: {raw_scan}")
         if schema.domain == "rag" and source.column:
             notes.append(f"Table header path: {source.column}")
+        if schema.domain == "rag" and result.context.get("aggregation") == "mean":
+            spread = result.context.get("published_spread")
+            notes.append(f"Published mean ({spread} standard deviation)" if spread else "Published mean")
         if result.context.get("metric_definition"):
             notes.append(f"Metric definition: {result.context['metric_definition']}")
         tables["results"].append({
@@ -159,7 +164,9 @@ def project_submission(
         })
     for issue in store.issues(schema.domain):
         tables["issues"].extend(_issue_rows(issue, exported_results, included))
-    return Submission(schema.domain, tables)
+    gate = quality_gate({key: doc["sha256"] for key, doc in included.items()},
+                        results, store.batch_documents(schema.domain))
+    return Submission(schema.domain, tables, quality_gate=gate)
 
 
 def main() -> None:
@@ -181,6 +188,7 @@ def main() -> None:
         submission = project_submission(Store(args.state), schema, args.pdf_dir,
                                         publication_ids=ids)
         export_submission(schema, submission, args.output, publication_ids=ids)
+        print(json.dumps({"output": str(args.output), "quality_gate": submission.quality_gate}))
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
 

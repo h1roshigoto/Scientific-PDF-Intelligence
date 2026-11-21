@@ -14,7 +14,10 @@ from .gigachat_evidence import Block, _NUMBER
 CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)\s*(?:[.:|–—]|$)", re.I)
 CELL = re.compile(rf"({_NUMBER})(?:\s*(±\s*{_NUMBER}))?(?:\s*(%|[A-Za-zµμΩΩ][\wµμ²^/ ()⁻−-]*))?")
 RECORD = re.compile(rf"\(({_NUMBER})\)")
-LAYOUT_VERSION = f"batch-layout-8/pymupdf-{pymupdf.VersionBind}"
+LAYOUT_VERSION = f"batch-layout-9/pymupdf-{pymupdf.VersionBind}"
+UNIT_ONLY = re.compile(r"^\([^()]+\)\s*[↑↓]?$")
+SCAN_AXES = {"scan direction", "sweep direction"}
+SCAN_DIRECTIONS = {"forward", "reverse", "average"}
 
 
 @dataclass(frozen=True)
@@ -35,11 +38,16 @@ class Fragment:
     caption: Block | None = None
     location: str | None = None
     caption_support: tuple[Block, ...] = ()
+    table_references: tuple[Block, ...] = ()
+    metric_definitions: tuple[Block, ...] = ()
+    caption_has_reference: bool = False
 
     def payload(self):
         return {
             "pdf_page": self.page, "location": self.location,
             "blocks": [asdict(block) for block in self.blocks],
+            "table_references": [b.block_id for b in self.table_references],
+            "metric_definitions": [b.block_id for b in self.metric_definitions],
             "table_cells": [
                 {"cell": cell.value.block_id, "row": [b.block_id for b in cell.row],
                  "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation,
@@ -53,13 +61,20 @@ def center(block: Block) -> float:
     return (block.bbox[0] + block.bbox[2]) / 2
 
 
-def _lines(page):
+def _lines(page, numeric_superscripts=None):
     raw = page.get_text("dict", flags=pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES)
     for obj in raw["blocks"]:
         for i, line in enumerate(obj.get("lines", ())):
             spans = line["spans"]
             runs = []
             for span in spans:
+                if numeric_superscripts is not None and span["flags"] & pymupdf.TEXT_FONT_SUPERSCRIPT and (
+                    re.fullmatch(r"\d+(?:[,–-]\d+)*", span["text"].strip())
+                ):
+                    numeric_superscripts.append(span)
+                # PyMuPDF can emit a standalone space bridging two adjacent columns.
+                if not span["text"].strip() and span["bbox"][2] - span["bbox"][0] > max(3, span["size"] * .5):
+                    continue
                 if runs and span["bbox"][0] - runs[-1][-1]["bbox"][2] <= max(3, span["size"] * .5):
                     runs[-1].append(span)
                 else:
@@ -145,16 +160,57 @@ def _aligned_groups(labels, leaves):
     return groups
 
 
-def _borderless(caption, lines):
+def _scan_rows(bands, caption):
+    headings = [(i, row) for i, (y, row) in enumerate(bands)
+                if 0 < y - caption.bbox[1] < 80 and len(row) >= 4 and row[1].text.casefold() in SCAN_AXES]
+    if len(headings) != 1:
+        return []
+    index, header = headings[0]
+    cells = []
+    device = None
+    previous_direction = None
+    prior_y = bands[index][0]
+    for y, row in bands[index + 1:]:
+        if y - prior_y > 24:
+            break
+        direction = next((b for b in row if b.text.casefold() in SCAN_DIRECTIONS
+                          and header[1].bbox[0] - 5 <= center(b) <= header[1].bbox[2] + 5), None)
+        if direction is None:
+            break
+        prefix = row[:row.index(direction)]
+        if len(prefix) == 1 and prefix[0].bbox[2] < header[1].bbox[0]:
+            device = prefix[0]
+        elif prefix or previous_direction != "forward" or direction.text.casefold() != "reverse":
+            break
+        values = row[row.index(direction) + 1:]
+        if not device or not values or not all(map(_number, values)):
+            break
+        matches = [[h for h in header[2:] if h.bbox[0] - 6 <= center(b) <= h.bbox[2] + 6] for b in values]
+        if any(len(link) != 1 for link in matches):
+            break
+        labels = [link[0] for link in matches]
+        if len(set(labels)) != len(values):
+            break
+        cells.extend(Cell(value, (device, direction), (label,), row_axis=header[1])
+                     for value, label in zip(values, labels, strict=True))
+        prior_y, previous_direction = y, direction.text.casefold()
+    return cells if len({cell.row for cell in cells}) >= 2 else []
+
+
+def _borderless(caption, lines, support):
     # Look for a repeated, independently aligned grid within the caption's column(s).
-    cx, cy, end, _ = caption.bbox
+    cx, cy, _, _ = caption.bbox
+    end = max(b.bbox[2] for b in support)
     bands = _bands((b, y) for b, y in lines
                    if abs(y - cy) < 245 and b.bbox[0] >= cx - 24 and b.bbox[2] < end + 41)
+    scan_bands = _bands((b, y) for b, y in lines
+                        if cy < y < cy + 185 and b.bbox[0] >= cx - 24)
+    if cells := _scan_rows(scan_bands, caption):
+        return cells
     grids = []
     for i, (y, row) in enumerate(bands):
-        usable = [b for b in row if b.bbox[0] <= cx + 44 or _number(b)]
-        if (not 2 <= len(usable) <= 31 or not re.search(r"[A-Za-z]", usable[0].text)
-                or not all(map(_number, usable[1:]))):
+        usable = [row[0], *(b for b in row[1:] if _number(b))]
+        if not 3 <= len(usable) <= 31 or not re.search(r"[A-Za-z]|^\d+(?:\.\d+)?%$", usable[0].text):
             continue
         columns = [center(b) for b in usable[1:]]
         if len(columns) < 2 or min(b - a for a, b in zip(columns, columns[1:])) < 7:
@@ -177,7 +233,7 @@ def _borderless(caption, lines):
     if len(grids) != 1:
         return []
     grid = grids[0]
-    first_band, first_y, _, columns = grid[0]
+    first_band, first_y, first_row, columns = grid[0]
     levels = []
     leaf_candidates = []
     row_axis = None
@@ -193,7 +249,9 @@ def _borderless(caption, lines):
         if not levels and len(labels) == 1:
             continue
         if not levels and len(labels) == len(columns) and all(
-            abs(center(label) - x) <= min(pitch * .43, 8) for label, x in zip(labels, columns)
+            abs(center(label) - center(value)) <= min(pitch * .43, 8)
+            or abs(label.bbox[0] - value.bbox[0]) <= 4
+            for label, value in zip(labels, first_row[1:], strict=True)
         ):
             leaf_candidates = labels
             extra = [b for b in row if b not in labels]
@@ -201,6 +259,17 @@ def _borderless(caption, lines):
             levels.append(labels)
             first_y = y
         elif levels:
+            # A single metric may sit immediately above an otherwise unit-only leaf.
+            if len(labels) == 1:
+                candidates = [j for j, leaf in enumerate(leaf_candidates)
+                              if UNIT_ONLY.fullmatch(leaf.text) and (
+                                  abs(center(labels[0]) - center(leaf)) <= 8
+                                  or abs(labels[0].bbox[0] - leaf.bbox[0]) <= 4)]
+                if len(candidates) == 1:
+                    level = [None] * len(columns)
+                    level[candidates[0]] = labels[0]
+                    levels.insert(0, level)
+                break
             expanded = _aligned_groups(labels, columns)
             if expanded is None:
                 # An unresolved header spanning the value columns invalidates the path.
@@ -211,15 +280,20 @@ def _borderless(caption, lines):
             first_y = y
     if not leaf_candidates:
         return []
+    if any(_number(row[0]) for _, _, row, _ in grid) and (
+        row_axis is None or abs(row_axis.bbox[0] - first_row[0].bbox[0]) > 8
+        or any(abs(row[0].bbox[0] - first_row[0].bbox[0]) > 8 for _, _, row, _ in grid)
+    ):
+        return []
     cells = []
     group = None
     prior_band = max(-1, first_band - 2)
     for row_band, _, row, _ in grid:
         for _, intermediate in bands[max(0, prior_band + 1):row_band]:
-            if len(intermediate) == 1 and center(intermediate[0]) > columns[0] + pitch:
+            if len(intermediate) == 1 and not _number(intermediate[0]) and center(intermediate[0]) > columns[0] + pitch:
                 group = intermediate[0]
         row_path = (group, row[0]) if group else (row[0],)
-        cells.extend(Cell(cell, row_path, tuple(level[j] for level in levels), row_axis=row_axis)
+        cells.extend(Cell(cell, row_path, tuple(level[j] for level in levels if level[j]), row_axis=row_axis)
                      for j, cell in enumerate(row[1:]))
         prior_band = row_band
     return cells
@@ -227,8 +301,14 @@ def _borderless(caption, lines):
 
 def _caption_blocks(caption, lines):
     stem = caption.block_id.rsplit("-l", 1)[0]
-    return tuple(b for b, _ in lines if b.block_id.startswith(stem + "-l")
-                 and 0 <= b.bbox[1] - caption.bbox[1] < 30)
+    support = tuple(b for b, _ in lines if b.block_id.startswith(stem + "-l")
+                    and 0 <= b.bbox[1] - caption.bbox[1] < 30)
+    if len(support) == 1 and re.fullmatch(CAPTION, caption.text):
+        inline = [b for b, _ in lines if abs(b.bbox[1] - caption.bbox[1]) <= 2
+                  and 0 < b.bbox[0] - caption.bbox[2] <= 12 and not CAPTION.match(b.text)]
+        if len(inline) == 1:
+            support += tuple(inline)
+    return support
 
 
 def _mean_record(caption, lines):
@@ -352,7 +432,8 @@ def _centered_row_groups(caption, lines):
 
 
 def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=None):
-    lines = list(_lines(page))
+    numeric_superscripts = []
+    lines = list(_lines(page, numeric_superscripts))
     captions = []
     for block, _ in lines:
         if CAPTION.match(block.text):
@@ -369,15 +450,19 @@ def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=Non
         if previous_captions is not None:
             previous_captions[location.casefold()] = support
         caption_text = " ".join(b.text for b in support)
+        caption_has_reference = any(
+            b.text.endswith(span["text"].strip()) and pymupdf.Rect(b.bbox).contains(pymupdf.Rect(span["bbox"]))
+            for b in support if b.block_id.startswith(f"p{page.number + 1}-") for span in numeric_superscripts
+        )
         # Geometric reconstruction often recovers merged headers in sparse ruled tables.
-        cells = _borderless(caption, lines) or _ruled(page, caption, ruled)
+        cells = _borderless(caption, lines, support) or _ruled(page, caption, ruled)
         if not cells and re.search(r"average and record \(between parentheses\)", caption_text, re.I):
             cells = _mean_record(caption, lines)
         if not cells:
             cells = _centered_row_groups(caption, lines)
         if not cells:
             issues.append({"reason": "table_layout_unresolved", "page": page.number + 1,
-                           "location": _caption_location(caption), "quote": caption.text})
+                           "location": location, "quote": caption.text, "source_block_id": caption.block_id})
             continue
         for _, row in groupby(cells, key=lambda cell: cell.row):
             row = list(row)
@@ -390,7 +475,7 @@ def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=Non
                         source.append(cell.row_axis)
                 fragments.append(Fragment(subset[0].value.block_id, page.number + 1,
                                           tuple(dict.fromkeys(source)), subset,
-                                          caption, location, support))
+                                          caption, location, support, caption_has_reference=caption_has_reference))
     for caption in captions:
         if _caption_location(caption).lower().startswith("fig"):
             fragments.extend(_figure_claims(page, caption, _caption_blocks(caption, lines), blocks))
