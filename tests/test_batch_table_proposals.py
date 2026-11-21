@@ -163,6 +163,30 @@ def test_rag_named_fixed_generator_requires_varying_retrieval_role(tmp_path, com
         assert missing_role in result.context["unconfirmed_context"]
 
 
+@pytest.mark.parametrize(("comparison", "columns", "missing_role"), [
+    ("compare prompt strategies on QA datasets", ("Zero-shot", "Few-shot"), "prompt_strategy"),
+    ("compare methods on QA datasets with a fixed generator", ("Qwen3.5", "Claude-3.5 Sonnet"),
+     "experiment_type"),
+])
+def test_rag_named_generator_cannot_verify_an_unconfirmed_column_role(tmp_path, comparison, columns, missing_role):
+    path = rag_multilevel_pdf(
+        tmp_path / "D001.pdf", (columns[0],), (columns[1],),
+        caption=f"Table 1: We {comparison}; generator: Gemini-2.5 Flash",
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = store.results("rag")
+    assert len(results) == 16
+    for result in results:
+        assert result.extraction_status == "needs_review"
+        assert result.note == "rag_context_unresolved"
+        assert result.context["generator_model"] == "Gemini-2.5 Flash"
+        assert result.context["rag_variant"] in {"GPT-4o mini", "Graph RAG"}
+        assert result.context["dataset_name"] in {"AtlasQA", "DeltaQA"}
+        assert result.context["header_path"][0] in columns
+        assert missing_role in result.context["unconfirmed_context"]
+
+
 def mock_model(monkeypatch, first_response):
     calls = []
     settings = GigaChatSettings(credentials=SecretStr("fixtureKey=="))

@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from .batch_checks import quality_gate, validate_results
 from .batch_evidence import (
-    MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSION, SUPPLEMENT, Reply, TableValueMismatch, make_prompt, model_fragments,
+    MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSIONS, SUPPLEMENT, Reply, TableValueMismatch, make_prompt, model_fragments,
     link_table_context, offline_proposals, relevant, unresolved_table_cells, verify,
 )
 from .batch_pdf import LAYOUT_VERSION, page_fragments
@@ -232,7 +232,8 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None)
         content = path.read_bytes()
         digest = sha256(content).hexdigest()
         mode = "local" if generation.complete is None else "gigachat"
-        revision = f"{digest}|{LAYOUT_VERSION}|{PROFILES[domain]}|{SCHEMA_VERSION}|{mode}"
+        schema_version = SCHEMA_VERSIONS[domain]
+        revision = f"{digest}|{LAYOUT_VERSION}|{PROFILES[domain]}|{schema_version}|{mode}"
         if previous and previous.get("revision") == revision:
             record = {**previous, "path": str(path)}
             plan_is_current = mode == "local" or record.get("model_plan_version") == MODEL_PLAN_VERSION
@@ -246,7 +247,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None)
                 if imported and imported.get("sha256") == digest and imported["file_path"] == str(path):
                     return
         record.update(sha256=digest, revision=revision, status="running", parser_version=LAYOUT_VERSION,
-                      profile=PROFILES[domain], schema_version=SCHEMA_VERSION, mode=mode, errors=[])
+                      profile=PROFILES[domain], schema_version=schema_version, mode=mode, errors=[])
         _checkpoint(store, record)
         fragments, layout_issues = [], []
         previous_captions = {}

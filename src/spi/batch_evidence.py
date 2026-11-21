@@ -17,7 +17,7 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSION = "batch-evidence-9"
+SCHEMA_VERSIONS = {"solar": "batch-evidence-9", "rag": "batch-evidence-10"}
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -71,7 +71,7 @@ NON_GENERATOR_COMPARISON = re.compile(
     r"\b(?:compar\w*|evaluat\w*|test\w*)\s+(?:(?:the|different|alternative|several|two)\s+)?"
     r"(?:(?P<retriever_model>retrieval (?:methods?|models?|backbones?|strategies?)|retrievers?)|"
     r"(?P<retrieval_method>(?:retrieval\s*(?:/\s*|and\s+))?rerank(?:ing|ers?))|"
-    r"prompt(?:ing)? (?:methods?|strategies?|variants?))\b", re.I,
+    r"(?P<prompt_strategy>prompt(?:ing)? (?:methods?|strategies?|variants?)))\b", re.I,
 )
 FIXED_GENERATOR = re.compile(
     r"\b(?:fixed|same|shared)\s+(?:generator|llm backbone)\b"
@@ -694,8 +694,15 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         missing = required - context.keys()
         if name in _UNITLESS_RAG_SCORES and "generator_model" in context and "experiment_type" not in context:
             # A caption can name fixed models without grounding the varying model for this cell.
-            missing.update(match.lastgroup for match in NON_GENERATOR_COMPARISON.finditer(_support_caption(fragment))
-                           if match.lastgroup)
+            caption = _support_caption(fragment)
+            varying_roles = {match.lastgroup or "experiment_type"
+                             for match in NON_GENERATOR_COMPARISON.finditer(caption)}
+            if not varying_roles and FIXED_GENERATOR.search(caption):
+                dataset = fold(context.get("dataset_name", ""))
+                headers = [fold(b.text) for b in cell.headers if not UNIT_ONLY.fullmatch(b.text)]
+                if any(header != dataset for header in headers[:-1]):
+                    varying_roles.add("experiment_type")
+            missing.update(varying_roles)
         if missing:
             errors.append("rag_context_unresolved")
             unconfirmed.update(dict.fromkeys(sorted(missing), "The table does not establish this experimental role."))
@@ -735,7 +742,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         note=" | ".join(dict.fromkeys(errors)) if errors else None,
         extraction_metadata=ExtractionMetadata(
             model_id=model_id, method="pymupdf_gigachat_json_schema" if model_id != "local"
-            else "pymupdf_verified_table", pdf_sha256=digest, schema_version=SCHEMA_VERSION,
+            else "pymupdf_verified_table", pdf_sha256=digest, schema_version=SCHEMA_VERSIONS[domain],
             profile=PROFILES[domain], source_block_id=proposal.block,
         ),
     )
