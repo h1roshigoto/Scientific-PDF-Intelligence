@@ -1,9 +1,45 @@
 """Check the compatibility of published measurements without changing them."""
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 
 from .batch_evidence import fold
 from .models import ValidationIssue
+
+
+def quality_gate(in_scope, results, checkpoints):
+    """Check scientific coverage for the selected document IDs and PDF hashes."""
+    verified = Counter()
+    needs_review = 0
+    for result in results:
+        metadata = result.extraction_metadata
+        if metadata is None or in_scope.get(result.document_id) != metadata.pdf_sha256:
+            continue
+        if result.extraction_status == "verified":
+            verified[result.document_id] += 1
+        elif result.extraction_status == "needs_review":
+            needs_review += 1
+    layout_unresolved = pending = unresolved_cells = 0
+    for document in checkpoints:
+        if document["document_id"] not in in_scope or in_scope[document["document_id"]] != document.get("sha256"):
+            continue
+        layout_unresolved += len(document.get("layout_issues", ()))
+        pending += document.get("pending_units", 0)
+        for unit in document.get("fragments", {}).values():
+            if unit.get("status") == "review":
+                unresolved_cells += len({detail["source_block_id"] for detail in unit.get("review_details", ())
+                                         if detail.get("source_block_id")})
+                if not unit.get("results") and not unit.get("review_details"):
+                    unresolved_cells += 1
+    unresolved = layout_unresolved + unresolved_cells + pending
+    missing = sorted(doc.split(":", 1)[1] for doc in in_scope.keys() - verified.keys())
+    status = "NO-GO" if not verified else "PARTIAL" if missing or needs_review or unresolved else "GO"
+    return {
+        "status": status, "ready": status == "GO",
+        "in_scope_publications": len(in_scope), "publications_with_verified_results": len(verified),
+        "verified_results": sum(verified.values()), "needs_review": needs_review, "unresolved": unresolved,
+        "layout_unresolved": layout_unresolved, "unresolved_cells_or_fragments": unresolved_cells,
+        "pending_units": pending, "publications_without_verified_results": missing,
+    }
 
 
 def check_pce(values, intensity, *, comparable):

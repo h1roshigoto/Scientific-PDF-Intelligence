@@ -164,6 +164,37 @@ def test_unknown_rag_scale_requires_review(value, metric):
         normalize(value, "", metric, "rag")
 
 
+@pytest.mark.parametrize(("header_text", "expected_error"), [
+    (("Acc. (%)↑",), None),
+    (("Acc.", "(%)↑"), None),
+    (("Acc. (%) ↓",), None),
+    (("Δ (%)↑",), "wrong_table_metric"),
+])
+def test_direction_arrow_preserves_the_explicit_unit(header_text, expected_error):
+    caption = Block("caption", (0, 0, 1, 1), "Table 1: We evaluate two methods; generator: Model A; dataset: QA")
+    row = Block("row", (0, 5, 1, 6), "Method A")
+    headers = tuple(
+        Block(f"h{i}", (5, 2 + i, 6, 3 + i), label)
+        for i, label in enumerate(header_text)
+    )
+    value = Block("cell", (5, 5, 6, 6), "62.75")
+    source = Fragment("table", 1, (caption, row, *headers, value), (Cell(value, (row,), headers),),
+                      caption, "Table 1")
+    proposal = Proposal(cell="cell", row=["row"], headers=[b.block_id for b in headers], block="cell",
+                        quote=value.text, raw_value=value.text, raw_unit="%", metric="accuracy", origin="primary")
+
+    if expected_error:
+        with pytest.raises(EvidenceError, match=expected_error):
+            verify(proposal, source, "rag", "rag:D001", "a" * 64, "local")
+        return
+    result, errors = verify(proposal, source, "rag", "rag:D001", "a" * 64, "local")
+    assert not errors
+    assert result.extraction_status == "verified"
+    assert result.raw == result.normalized
+    assert result.normalized.value == value.text and result.normalized.unit == "%"
+    assert result.source.column == " / ".join(header_text)
+
+
 def test_table_with_conflicting_explicit_units_cannot_verify():
     caption = Block("caption", (0, 0, 1, 1), "Table 1: Our measurements")
     row = Block("row", (0, 5, 1, 6), "Sample A")
