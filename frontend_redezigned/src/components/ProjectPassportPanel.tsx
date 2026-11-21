@@ -133,7 +133,7 @@ function PassportForm({ exporter }: { exporter: PassportExport }) {
                     </option>
                     {documents.map((doc) => (
                       <option key={doc.document_id} value={doc.document_id}>
-                        {publicationId(doc.document_id)}
+                        {doc.domain === 'solar' ? 'Solar' : 'RAG'} · {publicationId(doc.document_id)}
                         {doc.title || doc.filename ? ` · ${doc.title ?? doc.filename}` : ''}
                       </option>
                     ))}
@@ -143,7 +143,7 @@ function PassportForm({ exporter }: { exporter: PassportExport }) {
             </fieldset>
             <div className="passport-coverage muted" aria-live="polite">
               <p className="num">
-                Публикаций: {selectedDocuments.length} · Результатов: {resultCount} · Запуск{' '}
+                Публикаций: {selectedDocuments.length} · Результатов в списке: {resultCount} · Запуск{' '}
                 {exporter.runId}
               </p>
               {ocrPages > 0 && (

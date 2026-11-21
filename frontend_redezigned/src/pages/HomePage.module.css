@@ -149,6 +149,7 @@
 .traceOriginal { font: 400 16px/1.4 var(--font-paper); }
 .traceOriginal mark { padding-inline: .1em; background: var(--mark); color: inherit; }
 .traceCard figcaption { font-size: 12px; color: var(--ink-soft); }
+.retry { margin-inline-start: .65em; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 
 .rail {
   position: relative;

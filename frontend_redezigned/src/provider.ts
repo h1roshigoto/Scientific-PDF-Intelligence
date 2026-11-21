@@ -1,9 +1,9 @@
 import { createApiProvider } from './data';
 import { createMockProvider } from './mock';
 
-const passportPath = import.meta.env.VITE_PROJECT_PASSPORT_PATH?.trim();
+const passportPath = import.meta.env.VITE_PROJECT_PASSPORT_PATH?.trim() || 'export/project-passport.pdf';
 const runId = import.meta.env.VITE_PROJECT_RUN_ID?.trim();
-const passport = passportPath && runId && /^[\w/.-]+\.pdf$/.test(passportPath)
+const passport = runId && /^[\w/.-]+\.pdf$/.test(passportPath)
   ? { path: passportPath, runId, generatedAtHeader: import.meta.env.VITE_PROJECT_PASSPORT_GENERATED_AT_HEADER?.trim() }
   : undefined;
 

@@ -10,7 +10,6 @@ import { saveFile } from '../download';
 import { provider } from '../provider';
 
 const profiles = ['solar', 'rag'] as const;
-const csvNames = [...new Set(profiles.flatMap((profile) => [...csvFiles[profile]]))];
 
 function Downloads() {
   const [pending, setPending] = useState<string>();
@@ -19,16 +18,16 @@ function Downloads() {
 
   useEffect(() => () => current.current?.abort(), []);
 
-  async function download(filename: string, request: (signal: AbortSignal) => Promise<{ name: string; blob: Blob }[]>) {
+  async function download(filename: string, request: (signal: AbortSignal) => Promise<Blob>) {
     if (current.current) return;
     const controller = new AbortController();
     current.current = controller;
     setFeedback(undefined);
     setPending(filename);
     try {
-      const files = await request(controller.signal);
+      const blob = await request(controller.signal);
       if (!controller.signal.aborted) {
-        files.forEach((file) => saveFile(file.blob, file.name));
+        saveFile(blob, filename);
         setFeedback({ error: false, message: `Скачивание ${filename} началось.` });
       }
     } catch (error) {
@@ -39,15 +38,6 @@ function Downloads() {
       current.current = undefined;
       if (!controller.signal.aborted) setPending(undefined);
     }
-  }
-
-  function downloadCsv(name: string) {
-    const filename = `${name}.csv`;
-    const sources = profiles.filter((profile) => csvFiles[profile].some((entry) => entry === name));
-    return download(filename, (signal) => Promise.all(sources.map(async (profile, index) => ({
-      name: index === 0 ? filename : `${name}-${index + 1}.csv`,
-      blob: await provider.csv(profile, filename, signal),
-    }))));
   }
 
   return (
@@ -65,7 +55,7 @@ function Downloads() {
           <div className="panel-intro">
             <h2>Файлы CSV</h2>
             <p className="muted">
-              CSV формируется отдельным экспортёром. Варианты файлов скачиваются отдельно.
+              CSV формируется отдельным экспортёром для Solar и RAG.
             </p>
           </div>
           {!provider.csvAvailable && (
@@ -74,21 +64,25 @@ function Downloads() {
             </Note>
           )}
           {provider.csvAvailable && <ul className="file-list">
-            {csvNames.map((name) => (
-              <li key={name}>
-                <span className="file-name">{name}.csv</span>
+            {profiles.flatMap((profile) => csvFiles[profile].map((name) => {
+              const source = `${name}.csv`;
+              const filename = `${profile}-${source}`;
+              return (
+                <li key={filename}>
+                  <span className="file-name">{profile === 'solar' ? 'Solar' : 'RAG'} · {source}</span>
                   <button
                     className="button"
                     type="button"
                     disabled={Boolean(pending)}
-                    aria-label={`Скачать ${name}.csv`}
-                    onClick={() => void downloadCsv(name)}
+                    aria-label={`Скачать ${filename}`}
+                    onClick={() => void download(filename, (signal) => provider.csv(profile, source, signal))}
                   >
                     <Icon name="down" size={14} />
-                    {pending === `${name}.csv` ? 'Загрузка…' : 'Скачать'}
+                    {pending === filename ? 'Загрузка…' : 'Скачать'}
                   </button>
-              </li>
-            ))}
+                </li>
+              );
+            }))}
           </ul>}
         </section>
         <section className="surface export-panel">
@@ -103,7 +97,7 @@ function Downloads() {
             onClick={() =>
               void download(
                 'passport.md',
-                async () => [{ name: 'passport.md', blob: new Blob([passport], { type: 'text/markdown;charset=utf-8' }) }],
+                async () => new Blob([passport], { type: 'text/markdown;charset=utf-8' }),
               )
             }
           >
@@ -120,7 +114,7 @@ function Downloads() {
                 type="button"
                 className="button"
                 disabled={Boolean(pending)}
-                onClick={() => void download(name, async (signal) => [{ name, blob: await provider.exportJson(name, signal) }])}
+                onClick={() => void download(name, (signal) => provider.exportJson(name, signal))}
               >
                 {pending === name ? 'Загрузка…' : name}
               </button>

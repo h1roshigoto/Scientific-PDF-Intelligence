@@ -18,7 +18,7 @@ const steps = [
 const loadResults = (signal: AbortSignal) => provider.results(undefined, signal);
 
 export function HomePage() {
-  const { state } = useData(loadResults);
+  const { state, retry } = useData(loadResults);
   const featured = state.kind === 'ready' && state.data.find((row) =>
     row.normalized.value != null
     && formatValue({ ...row.normalized, unit: null }).length <= 6
@@ -62,7 +62,12 @@ export function HomePage() {
                 <div className={styles.traceTop}><span>{featured?.metric.name ?? 'Показатель'}</span><span>{featured ? `PDF, стр. ${featured.source.page}` : 'Источник'}</span></div>
                 <div className={styles.traceValue}><strong>{featured ? formatValue({ ...featured.normalized, unit: null }) : '—'}</strong><span>{featured?.normalized.unit}</span></div>
                 <div className={styles.traceOriginal}>Исходное значение {featured ? <><mark>{formatValue({ ...featured.raw, unit: null }, true)}</mark> {featured.raw.unit}</> : '—'}</div>
-                <figcaption aria-live="polite">{caption}</figcaption>
+                <figcaption aria-live="polite">
+                  {caption}
+                  {state.kind === 'error' && (
+                    <button type="button" className={styles.retry} onClick={retry}>Повторить</button>
+                  )}
+                </figcaption>
               </figure>
             </div>
           </div>

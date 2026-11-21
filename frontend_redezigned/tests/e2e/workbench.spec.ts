@@ -155,12 +155,12 @@ test('reports malformed responses and unknown documents without a fallback or a 
 
 test('E2E-09 downloads exporter-generated UTF-8 CSVs for both tracks', async ({ page }) => {
   await page.goto('/export?domain=solar');
-  const downloads: Download[] = [];
-  page.on('download', (download) => downloads.push(download));
-  await page.getByRole('button', { name: 'Скачать results.csv', exact: true }).click();
-  await expect.poll(() => downloads.length).toBe(2);
-  for (const [index, contents] of ['demo-solar-d001-voc', 'demo-rag-d001-em'].entries()) {
-    const download = downloads.find((file) => file.suggestedFilename() === (index ? 'results-2.csv' : 'results.csv'))!;
+  for (const [domain, contents] of [['solar', 'demo-solar-d001-voc'], ['rag', 'demo-rag-d001-em']]) {
+    const filename = `${domain}-results.csv`;
+    const pending = page.waitForEvent('download');
+    await page.getByRole('button', { name: `Скачать ${filename}`, exact: true }).click();
+    const download = await pending;
+    expect(download.suggestedFilename()).toBe(filename);
     const bytes = await readFile((await download.path())!);
     const csv = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     expect(csv.split('\r\n')[0]).toMatch(/^publication_id,result_id,/);
@@ -173,7 +173,7 @@ test('E2E-11 navigates the registry, checks, source links, passport and invalid 
   await page.goto('/results');
   await nav(page).getByRole('link', { name: 'Документы' }).click();
   await expect(page.getByText('OCR: 1 стр.', { exact: true })).toBeVisible();
-  await page.getByRole('row').filter({ hasText: fixture.documents[3].title }).getByRole('link', { name: 'Открыть PDF D001' }).click();
+  await page.getByRole('row').filter({ hasText: fixture.documents[3].title }).getByRole('link', { name: 'Открыть PDF RAG D001' }).click();
   await checkPdf(page, 1, 'RAG D001 - Page 1');
   await nav(page).getByRole('link', { name: 'Проверки' }).click();
   await expect(page.getByText(/Сверьте условия измерения B4/).last()).toBeVisible();
@@ -200,9 +200,9 @@ test('PDF and CSV recover from failed requests in API mode', async ({ page }) =>
   await page.route('**/fixture-csv/rag/results.csv', (route) => route.fulfill({ status: 502 }));
   await page.route('**/fixture-csv/solar/results.csv', (route) => route.fulfill({ body: 'document,value\r\nD001,1.2\r\n' }));
   await page.goto(`${apiUrl}/export?domain=rag`);
-  await page.getByRole('button', { name: 'Скачать results.csv', exact: true }).click();
+  await page.getByRole('button', { name: 'Скачать rag-results.csv', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('HTTP 502');
-  await expect(page.getByRole('button', { name: 'Скачать results.csv', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Скачать rag-results.csv', exact: true })).toBeEnabled();
 });
 
 test('invalid PDF page fails explicitly instead of displaying a different page', async ({ page }) => {

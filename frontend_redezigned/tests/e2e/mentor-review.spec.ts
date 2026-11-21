@@ -4,7 +4,7 @@ test('eligibility remains separate from PCE and exclusions do not create result 
   await page.goto('/documents?domain=solar');
   const excluded = page.getByRole('row', { name: /D006/ });
   await expect(excluded).toContainText('Вне области кейса');
-  await excluded.getByRole('link', { name: 'Открыть PDF D006' }).click();
+  await excluded.getByRole('link', { name: 'Открыть PDF Solar D006' }).click();
   const review = page.getByRole('region', { name: 'Допуск и доступность данных' });
   await expect(review.getByText('Вне области кейса', { exact: true })).toBeVisible();
   await expect(review.getByText(/двухпереходный тандем/)).toBeVisible();

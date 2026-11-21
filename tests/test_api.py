@@ -21,6 +21,7 @@ def test_read_api_and_internal_json_export_remain_compatible(tmp_path, monkeypat
     assert client.get("/documents", params={"domain": "rag"}).json() == documents[1:]
     assert client.get("/documents", params={"domain": "other"}).status_code == 422
     assert client.get("/documents/solar:D001/file").content == file.read_bytes()
+    assert client.get("/documents/rag:D001/file").status_code == 404
     assert client.get("/results", params={"domain": "solar"}).json() == []
     assert client.get("/results/missing").status_code == 404
     assert client.get("/issues", params={"domain": "rag"}).json() == []

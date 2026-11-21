@@ -38,13 +38,17 @@ async function readPdf(response: Response) {
   return blob.slice(0, blob.size, 'application/pdf');
 }
 
-function client(fetcher: typeof fetch, timeoutMs: number) {
+function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readonly<Record<number, string>> = {}) {
   async function request<T>(url: string, signal: AbortSignal, read: (response: Response) => Promise<T>, init?: RequestInit) {
     const timeout = AbortSignal.timeout(timeoutMs);
     try {
       const response = await fetcher(url, { ...init, signal: AbortSignal.any([signal, timeout]) });
-      if (response.status === 404) throw new DataError('Запрошенный файл или запись недоступны.');
-      if (!response.ok) throw new DataError(`Сервер вернул ошибку HTTP ${response.status}.`);
+      if (!response.ok) {
+        const message = statusMessages[response.status] ?? (response.status === 404
+          ? 'Запрошенный файл или запись недоступны.'
+          : `Сервер вернул ошибку HTTP ${response.status}.`);
+        throw new DataError(message);
+      }
       return await read(response);
     } catch (error) {
       if (signal.aborted) throw signal.reason;
@@ -102,6 +106,12 @@ export function jsonBlob(value: unknown) {
 }
 
 type ProjectPassportConfig = { path: string; runId: string; generatedAtHeader?: string };
+const passportErrors = {
+  404: 'Запуск или публикация недоступны (HTTP 404). Проверьте выбранную публикацию и VITE_PROJECT_RUN_ID.',
+  409: 'Идентификатор публикации неоднозначен (HTTP 409).',
+  500: 'Серверу не удалось сформировать полный PDF-паспорт (HTTP 500). Повторите попытку.',
+  503: 'Серверный PDF-паспорт недоступен (HTTP 503). Проверьте SPI_RUN_ID на сервере.',
+};
 
 export function createApiProvider({
   base = '/api', csvBase, fetcher = fetch, timeoutMs = 20_000, passport,
@@ -113,12 +123,12 @@ export function createApiProvider({
     runId: passport.runId,
     async download(scope, signal) {
       const url = `${endpoint(passport.path)}?${passportQuery(passport.runId, scope)}`;
-      return client(fetcher, 120_000).request(url, signal, async (response) => {
+      return client(fetcher, 120_000, passportErrors).request(url, signal, async (response) => {
         if (response.status === 202) throw new DataError('Сервер ещё не вернул готовый паспорт. Повторите попытку позже.');
         const blob = await readPdf(response);
         const trailer = await blob.slice(Math.max(0, blob.size - 1024)).text();
         if (!trailer.trimEnd().endsWith('%%EOF')) throw new DataError('PDF-паспорт загружен не полностью.');
-        const timestamp = passport.generatedAtHeader ? response.headers.get(passport.generatedAtHeader) : null;
+        const timestamp = response.headers.get(passport.generatedAtHeader || 'X-SPI-Generated-At');
         return {
           blob,
           filename: passportFilename(passport.runId, scope),
@@ -127,9 +137,10 @@ export function createApiProvider({
       });
     },
   };
+  const csvRoot = csvBase?.trim();
   return {
     mode: 'api',
-    csvAvailable: Boolean(csvBase),
+    csvAvailable: Boolean(csvRoot),
     projectPassport,
     documents: (domain, signal) => http.json(listEndpoint('documents', domain), scoped(documentSchema, domain), signal),
     results: (domain, signal) => http.json(listEndpoint('results', domain), scoped(resultSchema, domain), signal),
@@ -141,8 +152,8 @@ export function createApiProvider({
       return http.pdf(endpoint(`documents/${encodeURIComponent(documentId)}/file`), signal);
     },
     async csv(domain, filename, signal) {
-      if (!csvBase) throw new DataError('Папка с CSV-выгрузкой пока не подключена.');
-      return http.csv(joinUrl(csvBase, `${domain}/${requireCsvName(domain, filename)}`), signal);
+      if (!csvRoot) throw new DataError('Папка с CSV-выгрузкой пока не подключена.');
+      return http.csv(joinUrl(csvRoot, `${domain}/${requireCsvName(domain, filename)}`), signal);
     },
     exportJson: (artifact, signal) => http.request(endpoint(`export/${artifact}`), signal, async (response) => {
       const bytes = await response.arrayBuffer();

@@ -39,6 +39,28 @@ describe('project passport provider', () => {
     await expect(projectPassport!.download({ domain: 'solar' }, signal())).rejects.toThrow('распознать как PDF');
   });
 
+  it('times out a stalled passport request and allows a fresh download', async () => {
+    const timeout = new AbortController();
+    const timer = vi.spyOn(AbortSignal, 'timeout').mockReturnValueOnce(timeout.signal);
+    try {
+      const fetcher = vi.fn<typeof fetch>()
+        .mockImplementationOnce(async (_url, init) => new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        }))
+        .mockResolvedValueOnce(new Response(pdf, { headers: { 'X-SPI-Generated-At': '2026-11-20T17:40:00Z' } }));
+      const { projectPassport } = createApiProvider({ fetcher, passport: { path: 'export/project-passport.pdf', runId: 'r1' } });
+      const first = projectPassport!.download({ domain: 'all' }, signal());
+      timeout.abort(new DOMException('Timeout', 'TimeoutError'));
+      await expect(first).rejects.toThrow('Истекло время ожидания');
+      expect(timer).toHaveBeenCalledWith(120_000);
+      await expect(projectPassport!.download({ domain: 'all' }, signal())).resolves.toMatchObject({
+        generatedAt: '2026-11-20T17:40:00Z',
+      });
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
   it('keeps the two D001 files distinct in mock mode and rejects an unknown publication', async () => {
     const fetcher = vi.fn<typeof fetch>(async (url) => {
       const bytes = await readFile(new URL(`../../public${String(url)}`, import.meta.url));

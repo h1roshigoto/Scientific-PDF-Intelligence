@@ -89,10 +89,11 @@ export function DocumentsPage({ query }: { query: string }) {
                           doc.user_upload && doc.filename
                             ? doc.filename
                             : publicationId(doc.document_id);
+                        const track = doc.domain === 'solar' ? 'Solar' : 'RAG';
                         return (
                           <tr key={doc.document_id}>
                             <td data-label="Документ">
-                              <strong>{doc.user_upload ? 'Загруженный PDF' : label}</strong>
+                              <strong>{doc.user_upload ? 'Загруженный PDF' : `${track} · ${label}`}</strong>
                             </td>
                             <td data-label="Публикация">{doc.title ?? doc.filename ?? '—'}</td>
                             <td data-label="Страниц" className="num">
@@ -123,7 +124,7 @@ export function DocumentsPage({ query }: { query: string }) {
                             <td data-label="Источник">
                               <Link
                                 href={documentSourceUrl('documents', doc.document_id, 1)}
-                                aria-label={`Открыть PDF ${label}`}
+                                aria-label={`Открыть PDF ${doc.user_upload ? label : `${track} ${label}`}`}
                               >
                                 Открыть PDF
                               </Link>
