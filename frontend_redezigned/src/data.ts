@@ -98,8 +98,9 @@ async function readJson<T>(response: Response, schema: z.ZodType<T>) {
   return data.data;
 }
 
+const uploadId = z.string().regex(/^[a-f0-9]{32}$/);
 const uploadSchema = z.object({
-  upload_id: z.string().regex(/^[a-f0-9]{32}$/),
+  upload_id: uploadId,
   domain: domainSchema,
   original_filename: z.string().min(1).max(255),
   size_bytes: z.number().int().positive(),
@@ -109,6 +110,28 @@ const uploadSchema = z.object({
   created_at: z.iso.datetime({ offset: true }),
 });
 export type StoredUpload = z.infer<typeof uploadSchema>;
+
+const processingStatus = z.enum(['not_started', 'queued', 'processing', 'needs_review', 'completed', 'failed']);
+const processingStep = z.enum(['queued', 'validating_input', 'extracting', 'checking_results', 'finished']);
+const count = z.number().int().nonnegative();
+const processingSchema = z.object({
+  upload_id: uploadId,
+  job_id: uploadId.nullable(),
+  status: processingStatus,
+  step: processingStep.nullable(),
+  updated_at: z.iso.datetime({ offset: true }).nullable(),
+  diagnostic: z.string().nullable(),
+  retry_allowed: z.boolean(),
+  mode: z.enum(['local', 'gigachat']).nullable(),
+  coverage: z.string().nullable(),
+  counts: z.object({
+    pages: count, pages_analyzed: count, results: count, needs_review: count,
+    issues: count, unresolved: count, pending_fragments: count,
+  }).nullable(),
+  pages_needing_ocr: z.array(z.number().int().positive()),
+  human_review_required: z.boolean(),
+});
+export type UploadProcessing = z.infer<typeof processingSchema>;
 
 const uploadDetails = {
   uploads_disabled: 'Загрузка PDF выключена на сервере.',
@@ -120,6 +143,8 @@ const uploadDetails = {
   encrypted_pdf: 'Зашифрованные PDF не поддерживаются.',
   invalid_pdf: 'PDF повреждён или не содержит страниц.',
   upload_storage_error: 'Сервер не смог выполнить операцию с хранилищем. Повторите попытку.',
+  upload_processing_unconfigured: 'Обработка PDF ещё не настроена на сервере.',
+  upload_processing_storage_error: 'Сервер не смог прочитать или сохранить состояние анализа.',
 };
 
 export function createUploadClient(fetcher = fetch) {
@@ -132,6 +157,7 @@ export function createUploadClient(fetcher = fetch) {
     cache: 'no-store', credentials: 'omit', redirect: 'error',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
+  const uploadEndpoint = (id: string, action: string) => `${endpoint}/${encodeURIComponent(id)}/${action}`;
 
   return {
     async list(token: string, signal: AbortSignal) {
@@ -165,10 +191,33 @@ export function createUploadClient(fetcher = fetch) {
       }, { ...privateRequest(token), method: 'POST', body });
     },
     pdf(id: string, token: string, signal: AbortSignal) {
-      return http.request(`${endpoint}/${encodeURIComponent(id)}/file`, signal, readPdf, privateRequest(token));
+      return http.request(uploadEndpoint(id, 'file'), signal, readPdf, privateRequest(token));
+    },
+    process(id: string, token: string, signal: AbortSignal) {
+      const accepted = z.object({ upload_id: z.literal(id), job_id: uploadId, status: processingStatus });
+      return http.request(uploadEndpoint(id, 'process'), signal, (response) => {
+        if (response.status !== 202) throw new DataError('Сервер не подтвердил постановку в очередь.');
+        return readJson(response, accepted);
+      }, { ...privateRequest(token), method: 'POST' });
+    },
+    processing(id: string, token: string, signal: AbortSignal) {
+      return http.json(uploadEndpoint(id, 'processing'), processingSchema.refine((state) => state.upload_id === id),
+        signal, privateRequest(token));
+    },
+    results(upload: StoredUpload, token: string, signal: AbortSignal) {
+      const schema = resultSchema.refine((row) => row.domain === upload.domain
+        && row.document_id === `${upload.domain}:${upload.upload_id}`
+        && row.extraction_metadata?.pdf_sha256 === upload.sha256 && row.source.page <= upload.page_count);
+      return http.json(uploadEndpoint(upload.upload_id, 'results'), z.array(schema), signal, privateRequest(token));
+    },
+    issues(upload: StoredUpload, token: string, signal: AbortSignal) {
+      return http.json(uploadEndpoint(upload.upload_id, 'issues'), scoped(issueSchema, upload.domain),
+        signal, privateRequest(token));
     },
   };
 }
+
+export type UploadClient = ReturnType<typeof createUploadClient>;
 
 function scoped<T extends { domain: Domain }>(schema: z.ZodType<T>, domain?: Domain) {
   return z.array(domain ? schema.refine((row) => row.domain === domain) : schema);

@@ -11,6 +11,7 @@ import { ExportPage } from './pages/ExportPage';
 import { HomePage } from './pages/HomePage';
 import { NotFoundPage, ResultRoute } from './pages/ResultDetailPage';
 import { ResultsPage } from './pages/ResultsPage';
+import { UploadAnalysisPage } from './pages/UploadAnalysisPage';
 import { provider } from './provider';
 import './styles/index.css';
 
@@ -47,6 +48,9 @@ function App() {
         selected={selected}
       />
     );
+  } else if (route.view === 'upload-analysis') {
+    content = <UploadAnalysisPage uploadId={route.uploadId} resultId={route.resultId}
+      token={uploadToken} setToken={setUploadToken} />;
   } else if (route.section === 'documents') {
     content = <DocumentsPage query={filters.query} uploadToken={uploadToken} setUploadToken={setUploadToken} />;
   } else if (route.section === 'checks') {

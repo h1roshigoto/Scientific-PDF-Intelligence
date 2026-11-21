@@ -2,6 +2,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from hashlib import sha256
+from secrets import token_urlsafe
 from threading import Barrier
 
 import httpx
@@ -14,7 +15,7 @@ from spi.api import app
 from spi.upload_store import UploadStore
 
 
-TOKEN = {"Authorization": "Bearer synthetic-test-secret"}
+TOKEN = {"Authorization": "Bearer synthetic-test-secret-0123456789"}
 
 
 def pdf_bytes(**save_options):
@@ -30,13 +31,16 @@ def private_uploads(tmp_path, monkeypatch):
         "SPI_STATE_DIR": tmp_path / "outputs" / "p0-22-release" / "state",
         "SPI_UPLOAD_DIR": tmp_path / "pdfs",
         "SPI_UPLOAD_STATE_DIR": tmp_path / "upload-state",
+        "SPI_UPLOAD_PROCESS_STATE_DIR": tmp_path / "processing",
     }
     for name, path in paths.items():
         monkeypatch.setenv(name, str(path))
     monkeypatch.setenv("SPI_UPLOAD_ENABLED", "true")
-    monkeypatch.setenv("SPI_UPLOAD_TOKEN", "synthetic-test-secret")
+    monkeypatch.setenv("SPI_UPLOAD_TOKEN", "synthetic-test-secret-0123456789")
     monkeypatch.setenv("SPI_UPLOAD_MAX_BYTES", "4096")
     monkeypatch.setenv("SPI_UPLOAD_MAX_FILES", "10")
+    monkeypatch.setenv("SPI_UPLOAD_PROCESS_GIGACHAT", "false")
+    monkeypatch.setenv("SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS", "8")
     return paths
 
 
@@ -88,10 +92,27 @@ def test_all_operations_require_bearer(private_uploads, headers):
     upload_id = "0" * 32
     calls = [post(client, pdf_bytes(), headers=headers)]
     calls += [client.get(url, headers=headers) for url in (
-        "/uploads", f"/uploads/{upload_id}", f"/uploads/{upload_id}/file"
+        "/uploads", f"/uploads/{upload_id}", f"/uploads/{upload_id}/file",
+        f"/uploads/{upload_id}/processing", f"/uploads/{upload_id}/results", f"/uploads/{upload_id}/issues",
     )]
+    calls.append(client.post(f"/uploads/{upload_id}/process", headers=headers))
     assert all(response.status_code == 401 and response.headers["www-authenticate"] == "Bearer" for response in calls)
     assert all(not path.exists() for path in private_uploads.values())
+
+
+@pytest.mark.parametrize("value", ["A" * 31, " " + "A" * 32, "A" * 31 + "!", "а" * 32])
+def test_malformed_or_short_token(private_uploads, monkeypatch, value):
+    monkeypatch.setenv("SPI_UPLOAD_TOKEN", value)
+    response = TestClient(app).get("/uploads", headers=TOKEN)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "uploads_misconfigured"}
+    assert all(not path.exists() for path in private_uploads.values())
+
+
+def test_urlsafe_token(private_uploads, monkeypatch):
+    token = token_urlsafe(32)
+    monkeypatch.setenv("SPI_UPLOAD_TOKEN", token)
+    assert post(TestClient(app), pdf_bytes(), headers={"Authorization": f"Bearer {token}"}).status_code == 201
 
 
 def test_disabled_by_default_and_missing_secret(private_uploads, monkeypatch):
@@ -228,13 +249,10 @@ def test_write_error_rolls_back_file_and_metadata(private_uploads, monkeypatch):
 
 
 @pytest.mark.parametrize("bad_dir", [
-    "outputs/e2e-dev/state/user-files",
-    "outputs/p0-21-test-local/state",
-    "outputs/p0-22-release",
-    "data/solar/test",
-    "data/rag/test",
+    ".", "..", "src", "tests", "outputs", "data", "frontend_redezigned",
+    "outputs/e2e-dev/state/user-files", "data/rag/test",
 ])
-@pytest.mark.parametrize("setting", ["SPI_UPLOAD_DIR", "SPI_UPLOAD_STATE_DIR"])
+@pytest.mark.parametrize("setting", ["SPI_UPLOAD_DIR", "SPI_UPLOAD_STATE_DIR", "SPI_UPLOAD_PROCESS_STATE_DIR"])
 def test_protected_project_trees(private_uploads, monkeypatch, bad_dir, setting):
     monkeypatch.setenv(setting, str(upload_store.PROJECT_ROOT / bad_dir))
     assert post(TestClient(app), pdf_bytes()).status_code == 503
@@ -265,22 +283,44 @@ def test_release_store_unchanged_and_overlapping_configuration_denied(private_up
     assert marker.read_bytes() == b'[{"document_id":"solar:official"}]'
 
 
-def test_link_into_protected_store_denied(private_uploads, monkeypatch, tmp_path):
-    release = private_uploads["SPI_STATE_DIR"]
-    release.mkdir(parents=True)
-    alias = tmp_path / "alias"
+def directory_alias(alias, target):
     try:
-        alias.symlink_to(release, target_is_directory=True)
+        alias.symlink_to(target, target_is_directory=True)
     except OSError:
         # Windows can allow directory junctions even without symlink privileges.
         import subprocess
         import sys
         if sys.platform != "win32":
             raise
-        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(release)], check=True)
-    monkeypatch.setenv("SPI_UPLOAD_DIR", str(alias / "nested"))
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(alias), str(target)], check=True)
+
+
+@pytest.mark.parametrize("setting", ["SPI_UPLOAD_DIR", "SPI_UPLOAD_STATE_DIR", "SPI_UPLOAD_PROCESS_STATE_DIR"])
+@pytest.mark.parametrize("protected", ["checkout", "release"])
+def test_link_into_protected_store_denied(private_uploads, monkeypatch, tmp_path, setting, protected):
+    release = private_uploads["SPI_STATE_DIR"]
+    release.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    directory_alias(alias, release if protected == "release" else upload_store.PROJECT_ROOT)
+    monkeypatch.setenv(setting, str(alias / "nested"))
     assert post(TestClient(app), pdf_bytes()).status_code == 503
     assert not list(release.iterdir())
+
+
+def test_processing_path_cannot_overlap_other_private_roots(private_uploads, monkeypatch):
+    for other in ("SPI_UPLOAD_DIR", "SPI_UPLOAD_STATE_DIR", "SPI_STATE_DIR"):
+        monkeypatch.setenv("SPI_UPLOAD_PROCESS_STATE_DIR", str(private_uploads[other] / "processing"))
+        assert post(TestClient(app), pdf_bytes()).json() == {"detail": "uploads_misconfigured"}
+
+
+def test_processing_can_be_unconfigured_with_originals_enabled(private_uploads, monkeypatch):
+    monkeypatch.delenv("SPI_UPLOAD_PROCESS_STATE_DIR")
+    client = TestClient(app)
+    response = post(client, pdf_bytes())
+    assert response.status_code == 201
+    response = client.post(f"/uploads/{response.json()['upload_id']}/process", headers=TOKEN)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "upload_processing_unconfigured"}
 
 
 def test_openapi_describes_private_multipart_and_pdf():

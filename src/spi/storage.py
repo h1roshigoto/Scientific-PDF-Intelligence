@@ -14,12 +14,15 @@ class Store:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def _path(self, name):
+        return self.root / name
+
     def read(self, name):
-        path = self.root / name
+        path = self._path(name)
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
 
     def write(self, name, data):
-        target = self.root / name
+        target = self._path(name)
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = None
         try:
@@ -35,14 +38,14 @@ class Store:
     @contextmanager
     def _write_lock(self):
         # The SQLite write lock serializes JSON read-modify-write across processes.
-        with closing(sqlite3.connect(self.root / "write-lock.sqlite3", timeout=15)) as lock, lock:
+        with closing(sqlite3.connect(self._path("write-lock.sqlite3"), timeout=15)) as lock, lock:
             lock.execute("BEGIN IMMEDIATE")
             yield
 
     @contextmanager
     def batch_lock(self):
         # Held across parsing and model calls. A terminated process releases the lock.
-        with closing(sqlite3.connect(self.root / "batch-lock.sqlite3", timeout=0)) as lock, lock:
+        with closing(sqlite3.connect(self._path("batch-lock.sqlite3"), timeout=0)) as lock, lock:
             lock.execute("BEGIN IMMEDIATE")
             yield
 

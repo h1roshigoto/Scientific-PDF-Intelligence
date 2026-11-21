@@ -24,6 +24,49 @@ class StoredUpload(BaseModel):
     created_at: datetime
 
 
+ProcessingStatus = Literal["not_started", "queued", "processing", "needs_review", "completed", "failed"]
+
+
+class ProcessingCounts(BaseModel):
+    pages: int
+    pages_analyzed: int
+    results: int
+    needs_review: int
+    issues: int
+    unresolved: int
+    pending_fragments: int
+
+
+class ProcessingPage(BaseModel):
+    page: int = Field(ge=1)
+    read_status: Literal["text", "empty", "ocr_required", "error"]
+    ocr_status: Literal["pending", "unknown", "not_needed"]
+    analysis_failed: bool = False
+
+
+class UploadProcessing(BaseModel):
+    upload_id: str = Field(pattern=UPLOAD_ID_PATTERN)
+    job_id: str | None = Field(default=None, pattern=UPLOAD_ID_PATTERN)
+    status: ProcessingStatus
+    step: Literal["queued", "validating_input", "extracting", "checking_results", "finished"] | None = None
+    updated_at: datetime | None = None
+    diagnostic: str | None = None
+    retry_allowed: bool = False
+    mode: Literal["local", "gigachat"] | None = None
+    coverage: str | None = None
+    counts: ProcessingCounts | None = None
+    pages_needing_ocr: list[int] = Field(default_factory=list)
+    pages: list[ProcessingPage] = Field(default_factory=list)
+    human_review_required: bool = False
+    recoveries: int = Field(default=0, ge=0)
+
+
+class UploadJobAccepted(BaseModel):
+    upload_id: str
+    job_id: str
+    status: ProcessingStatus
+
+
 class PublicationScope(BaseModel):
     """A scope review for one version of an imported PDF."""
     model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
