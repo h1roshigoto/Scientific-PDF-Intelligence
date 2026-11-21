@@ -145,6 +145,99 @@ def test_numeric_cells_do_not_establish_missing_scientific_roles(tmp_path, domai
     assert all(missing in r.context["unconfirmed_context"] for r in results)
 
 
+@pytest.mark.parametrize("comparison", ["retrievers", "rerankers", "opinion extraction models"])
+def test_row_metric_preserves_header_and_first_row_without_assigning_model_roles(tmp_path, comparison):
+    path = _pdf(
+        tmp_path / "row-metric.pdf",
+        f"Table 2: We compare {comparison}; generator: Answer-7B; dataset: ArchiveQA",
+        [(75, [(40, "Metric"), (145, "Mistral-7B"), (245, "Gemini-2.5")]),
+         (90, [(40, "Accuracy (%)"), (158, "84.0"), (256, "85.0*")]),
+         (105, [(40, "Recall@5"), (158, "0.41"), (256, "0.52")]),
+         (120, [(40, "Coverage"), (158, "26.0"), (256, "35.0")])],
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    first, left, right = sorted(store.results("rag"), key=lambda r: r.metric.name + r.raw.value)
+    assert first.raw.value == "84.0" and first.raw.unit == "%"
+    assert first.context["header_path"] == ["Mistral-7B"]
+    assert first.source.row == "Accuracy (%)" and first.source.column == "Mistral-7B"
+    assert first.source.fragment == "84.0" and first.source.origin == "primary"
+    assert [b["text"] for b in first.context["context_evidence"]["metric"]] == ["Accuracy (%)", "Metric"]
+    for result in (first, left, right):
+        assert result.extraction_status == "needs_review"
+        assert result.context["generator_model"] == "Answer-7B"
+        assert result.context["dataset_name"] == "ArchiveQA"
+        assert {"retriever_model", "retrieval_method", "rag_variant"}.isdisjoint(result.context)
+        assert "column_role" in result.context["unconfirmed_context"]
+    for result in (left, right):
+        assert result.metric.name == "recall" and result.metric.k == 5
+        assert result.raw.unit is None and result.normalized.value is None
+        assert "metric_scale" in result.context["unconfirmed_context"]
+    document, = store.batch_documents("rag")
+    details = {d["value"]["text"]: d for f in document["fragments"].values() for d in f.get("review_details", [])}
+    assert details["85.0*"]["code"] == "unsupported_number"
+    assert details["85.0*"]["headers"][0]["text"] == "Gemini-2.5"
+    assert details["26.0"]["code"] == "unknown_metric"
+
+
+@pytest.mark.parametrize("parent_x", [177, 220])
+def test_row_metric_requires_unambiguous_multilevel_columns(tmp_path, parent_x):
+    path = _pdf(
+        tmp_path / "groups.pdf",
+        "Table 3: We compare retrieval methods on ArchiveQA with raw and enriched indexing in each experiment.",
+        [(75, [(parent_x, "Semantic"), (355, "Hybrid")]),
+         (90, [(40, "Metric"), (145, "Raw"), (225, "Enriched"), (315, "Raw"), (395, "Enriched")]),
+         (105, [(40, "F1"), (145, "0.45"), (230, "0.52"), (315, "0.55"), (400, "0.56")]),
+         (120, [(40, "EM"), (145, "0.35"), (230, "0.42"), (315, "0.43"), (400, "0.51")])],
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = store.results("rag")
+    if parent_x == 177:
+        assert len(results) == 8 and all(r.extraction_status == "needs_review" for r in results)
+        assert next(r for r in results if r.raw.value == "0.55").source.column == "Hybrid / Raw"
+        assert next(r for r in results if r.raw.value == "0.52").context["header_path"] == ["Semantic", "Enriched"]
+    else:
+        assert not results
+        document, = store.batch_documents("rag")
+        assert [issue["reason"] for issue in document["layout_issues"]] == ["table_layout_unresolved"]
+
+
+def test_conflicting_row_metric_and_column_statistic_remain_unresolved(tmp_path):
+    path = _pdf(
+        tmp_path / "mixed.pdf",
+        "Table 4: We compare systems on ArchiveQA and report raw scores and their differences.",
+        [(75, [(40, "Metric"), (145, "System-A (v2)"), (245, "Accuracy"), (345, "Delta")]),
+         (90, [(40, "F1"), (164, "0.45"), (254, "0.51"), (352, "0.06")]),
+         (105, [(40, "EM"), (164, "0.35"), (254, "0.39"), (352, "0.04")])],
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    results = store.results("rag")
+    assert {r.raw.value for r in results} == {"0.45", "0.35"}
+    assert all(r.raw.unit is None and r.extraction_status == "needs_review" for r in results)
+    document, = store.batch_documents("rag")
+    details = [d for f in document["fragments"].values() for d in f.get("review_details", [])]
+    assert len(details) == 4 and all(d["code"] == "ambiguous_header" for d in details)
+
+
+@pytest.mark.parametrize("axis", ["Metric", "System"])
+def test_unaligned_first_value_cannot_become_a_header(tmp_path, axis):
+    path = _pdf(
+        tmp_path / "misaligned.pdf",
+        "Table 5: We evaluate on ArchiveQA using Llama-8B and report the individual comparison scores.",
+        [(75, [(40, axis), (145, "Alpha"), (220, "Beta"), (295, "Gamma")]),
+         (90, [(40, "F1"), (145, "0.44"), (220, "0.51"), (330 if axis == "Metric" else 295, "0.59*")]),
+         (105, [(40, "EM"), (145, "0.34"), (220, "0.41"), (295, "0.43")]),
+         (120, [(40, "Accuracy"), (145, "0.36"), (220, "0.48"), (295, "0.53")])],
+    )
+    store = Store(tmp_path / "state")
+    batch.run_batch(store, [path], "rag", local_only=True)
+    assert not store.results("rag")
+    document, = store.batch_documents("rag")
+    assert [issue["reason"] for issue in document["layout_issues"]] == ["table_layout_unresolved"]
+
+
 def test_quality_gate_zero_results_can_coexist_with_structural_export(tmp_path):
     from spi.csv_export import validate_submission
     from spi.csv_schema import load_schema

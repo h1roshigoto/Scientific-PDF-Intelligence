@@ -19,6 +19,7 @@ UNIT_ONLY = re.compile(r"^\([^()]+\)\s*[↑↓]?$")
 SCAN_AXES = {"scan direction", "sweep direction"}
 SCAN_DIRECTIONS = {"forward", "reverse", "average"}
 RETRIEVER_AXES = {"retriever", "retriever model", "retrieval method", "encoder", "reranker"}
+METRIC_AXIS = "metric"
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,12 @@ def _lines(page, numeric_superscripts=None):
 
 def _number(block):
     return CELL.fullmatch(block.text) is not None
+
+
+def _numeric_cell(block):
+    # Recognize the footprint of a value even when verification cannot parse its notation.
+    match = CELL.fullmatch(block.text.replace("−", "-").rstrip("*†‡").rstrip())
+    return match is not None and (match[3] or "").casefold() in {"", "%", "pp", "ms", "s", "fraction", "ratio"}
 
 
 def _bands(lines):
@@ -228,7 +235,75 @@ def _scan_rows(bands, caption):
     return cells if len({cell.row for cell in cells}) >= 2 else []
 
 
-def _borderless(caption, lines, support):
+def _metric_rows(bands, caption, support, other_captions):
+    caption_end = max(b.bbox[3] for b in support)
+    headings = [(i, y, row) for i, (y, row) in enumerate(bands)
+                if 0 < row[0].bbox[1] - caption_end < 65
+                and row[0].text.casefold() == METRIC_AXIS
+                and not any(caption.bbox[1] < top < row[0].bbox[1] for top in other_captions)]
+    if not headings:
+        return None
+    if len(headings) != 1:
+        return []
+    index, y, (axis, *leaves) = headings[0]
+    if not 2 <= len(leaves) <= 30 or any(_numeric_cell(b) for b in leaves):
+        return []
+    columns = [center(b) for b in leaves]
+    gaps = [b - a for a, b in zip(columns, columns[1:])]
+    if min(gaps) < 7:
+        return []
+    edges = [columns[0] - gaps[0] / 2, *((a + b) / 2 for a, b in zip(columns, columns[1:])),
+             columns[-1] + gaps[-1] / 2]
+    slots = list(zip(edges[:-1], edges[1:], strict=True))
+    if not all(left <= b.bbox[0] and b.bbox[2] <= right for b, (left, right) in zip(leaves, slots, strict=True)):
+        return []
+    paths = [(leaf,) for leaf in leaves]
+    # Support a single tier of parent groups and reject competing upper bands.
+    upper_levels = []
+    previous_y = y
+    for upper_y, upper_row in reversed(bands[:index]):
+        if previous_y - upper_y > 21:
+            break
+        if parents := [b for b in upper_row if b.bbox[1] > caption_end
+                       and b.bbox[0] < edges[-1] and b.bbox[2] > edges[0]]:
+            upper_levels.append(parents)
+        previous_y = upper_y
+    if len(upper_levels) > 1:
+        return []
+    if upper_levels:
+        parents, = upper_levels
+        pitch = median(gaps)
+        expanded = _aligned_groups(parents, columns)
+        if expanded is None or any(_numeric_cell(b) for b in parents):
+            return []
+        size = len(columns) // len(parents)
+        for i, parent in enumerate(parents):
+            start, end = i * size, (i + 1) * size
+            if (parent.bbox[0] < edges[start] or parent.bbox[2] > edges[end]
+                    or abs(center(parent) - (columns[start] + columns[end - 1]) / 2) > min(8, pitch * .3)):
+                return []
+        paths = [(parent, leaf) for parent, leaf in zip(expanded, leaves, strict=True)]
+    if len({tuple(b.text.casefold() for b in path) for path in paths}) != len(paths):
+        return []
+    rows = []
+    for row_y, (label, *values) in bands[index + 1:]:
+        if row_y - y > 24 or any(caption_end < top < label.bbox[1] for top in other_captions):
+            break
+        if (abs(label.bbox[0] - axis.bbox[0]) > 4 or label.bbox[2] > edges[0] or _numeric_cell(label)
+                or len(values) != len(leaves) or not all(map(_numeric_cell, values))):
+            break
+        if not all(left <= b.bbox[0] and b.bbox[2] <= right and abs(center(b) - column) <= 8
+                   for b, (left, right), column in zip(values, slots, columns, strict=True)):
+            break
+        rows.append((label, values))
+        y = row_y
+    if len(rows) < 2:
+        return []
+    return [Cell(value, (label,), path, row_axis=axis) for label, values in rows
+            for value, path in zip(values, paths, strict=True)]
+
+
+def _borderless(caption, lines, support, *, row_metrics=False):
     # Look for a repeated, independently aligned grid within the caption's column(s).
     cx, cy, _, _ = caption.bbox
     end = max(b.bbox[2] for b in support)
@@ -238,6 +313,13 @@ def _borderless(caption, lines, support):
                         if cy < y < cy + 185 and b.bbox[0] >= cx - 24)
     if cells := _scan_rows(scan_bands, caption):
         return cells
+    other_captions = [b.bbox[1] for b, _ in lines if b != caption and b.bbox[0] >= cx - 24
+                      and b.bbox[2] < end + 41 and CAPTION.match(b.text)
+                      and b.text.lower().startswith("table")]
+    if row_metrics:
+        metric_cells = _metric_rows(bands, caption, support, other_captions)
+        if metric_cells is not None:
+            return metric_cells
     grids = []
     for i, (y, row) in enumerate(bands):
         usable = [row[0], *(b for b in row[1:] if _number(b))]
@@ -252,9 +334,6 @@ def _borderless(caption, lines, support):
             grids[-1].append((i, y, usable, columns))
         else:
             grids.append([(i, y, usable, columns)])
-    other_captions = [b.bbox[1] for b, _ in lines if b != caption and b.bbox[0] >= cx - 24
-                      and b.bbox[2] < end + 41 and CAPTION.match(b.text)
-                      and b.text.lower().startswith("table")]
     grids = [
         grid for grid in grids if len(grid) >= 2 and (
             0 < grid[0][1] - cy < 105 and not any(cy < y < grid[0][1] for y in other_captions)
@@ -284,6 +363,8 @@ def _borderless(caption, lines, support):
             continue
         if not levels and len(labels) == 1:
             continue
+        if row_metrics and any(map(_numeric_cell, labels)):
+            return []
         if not levels and len(labels) == len(columns) and all(
             abs(center(label) - center(value)) <= min(pitch * .43, 8)
             or abs(label.bbox[0] - value.bbox[0]) <= 4
@@ -477,7 +558,7 @@ def _centered_row_groups(caption, lines):
     return cells
 
 
-def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=None):
+def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=None, row_metrics=False):
     numeric_superscripts = []
     lines = list(_lines(page, numeric_superscripts))
     captions = []
@@ -501,11 +582,13 @@ def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=Non
             for b in support if b.block_id.startswith(f"p{page.number + 1}-") for span in numeric_superscripts
         )
         # Geometric reconstruction often recovers merged headers in sparse ruled tables.
-        cells = _borderless(caption, lines, support) or _ruled(page, caption, ruled)
+        cells = _borderless(caption, lines, support, row_metrics=row_metrics) or _ruled(page, caption, ruled)
         if not cells and re.search(r"average and record \(between parentheses\)", caption_text, re.I):
             cells = _mean_record(caption, lines)
         if not cells:
             cells = _centered_row_groups(caption, lines)
+        if row_metrics and any(_numeric_cell(header) for cell in cells for header in cell.headers):
+            cells = []
         if not cells:
             issues.append({"reason": "table_layout_unresolved", "page": page.number + 1,
                            "location": location, "quote": caption.text, "source_block_id": caption.block_id})
