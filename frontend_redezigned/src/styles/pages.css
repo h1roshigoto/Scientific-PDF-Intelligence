@@ -88,6 +88,8 @@ blockquote mark { color: inherit; padding: 0 2px; margin: 0 -2px; background: li
 .upload-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 0; border-top: 1px solid var(--rule); }
 .upload-record { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
 .upload-record p { margin-top: 2px; }
+.upload-analysis-controls { flex-basis: 100%; min-width: 0; }
+.upload-status, .upload-issues { overflow-wrap: anywhere; }
 .upload-preview { margin-top: 16px; }
 .upload-preview > button { margin-bottom: 8px; }
 .not-found-actions { margin-top: 16px; }

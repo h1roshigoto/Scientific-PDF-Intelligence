@@ -1,6 +1,7 @@
 """Storage and technical PDF validation for private uploads."""
 
 import os
+import re
 import sqlite3
 import unicodedata
 from contextlib import closing
@@ -9,14 +10,14 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
-from stat import S_ISREG
+from stat import FILE_ATTRIBUTE_REPARSE_POINT, S_ISDIR, S_ISREG
 from tempfile import NamedTemporaryFile
 from threading import Lock
 from typing import BinaryIO
 
 import pymupdf
 
-from .models import Domain, StoredUpload
+from .models import UPLOAD_ID_PATTERN, Domain, StoredUpload
 
 DEFAULT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 COPY_CHUNK = 128 * 1024
@@ -38,6 +39,10 @@ class UploadQuotaFull(ValueError):
     pass
 
 
+class UnsafePrivatePath(OSError):
+    pass
+
+
 def _path_aliases(path: Path, resolved: Path) -> set[Path]:
     return {Path(os.path.abspath(path)), resolved}
 
@@ -45,6 +50,37 @@ def _path_aliases(path: Path, resolved: Path) -> set[Path]:
 def _overlap(first: set[Path], second: set[Path]) -> bool:
     return any(left.is_relative_to(right) or right.is_relative_to(left)
                for left in first for right in second)
+
+
+def upload_token() -> str:
+    token = os.getenv("SPI_UPLOAD_TOKEN", "")
+    if len(token) < 32 or not re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token):
+        raise ValueError("Invalid private upload token")
+    return token
+
+
+def private_path(root: Path, relative: Path, *, directory: bool = False) -> Path:
+    """Reject links, junctions and hard-linked files within a private root."""
+    if relative.anchor or ".." in relative.parts:
+        raise ValueError("Expected a path relative to private storage")
+    path = root / relative
+    for entry in (*reversed(path.parents), path):
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        is_directory = directory or entry != path
+        if (getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+                or (is_directory and not S_ISDIR(info.st_mode))
+                or (not is_directory and (not S_ISREG(info.st_mode) or info.st_nlink != 1))):
+            raise UnsafePrivatePath("Unsafe private storage path")
+    return path
+
+
+def private_sqlite_path(root: Path, name: Path) -> Path:
+    for suffix in ("-journal", "-wal", "-shm"):
+        private_path(root, name.with_name(name.name + suffix))
+    return private_path(root, name)
 
 
 def _positive_limit(name: str, default: int) -> int:
@@ -82,6 +118,7 @@ class UploadStore:
     state: Path
     max_bytes: int
     max_files: int
+    processing: Path | None = None
 
     @classmethod
     def from_env(cls) -> "UploadStore":
@@ -89,38 +126,30 @@ class UploadStore:
         state_value = os.getenv("SPI_UPLOAD_STATE_DIR", "").strip()
         if not files_value or not state_value:
             raise ValueError("Both upload paths must be configured")
-        files, state = Path(files_value), Path(state_value)
-        resolved_files, resolved_state = files.resolve(), state.resolve()
-        file_aliases = _path_aliases(files, resolved_files)
-        state_aliases = _path_aliases(state, resolved_state)
-        protected = {Path(os.getenv("SPI_STATE_DIR", "state"))}
-        for root in {PROJECT_ROOT, Path.cwd()}:
-            protected.update(root / name for name in (
-                "data", "data/solar/dev", "data/solar/test", "data/rag/dev", "data/rag/test",
-                "outputs", "outputs/e2e-dev/state", "outputs/p0-21-test-local/state",
-                "outputs/p0-22-release", "state", "frontend_redezigned",
-            ))
+        process_value = os.getenv("SPI_UPLOAD_PROCESS_STATE_DIR", "").strip()
+        paths = [Path(value) for value in (files_value, state_value, process_value) if value]
+        resolved = [path.resolve() for path in paths]
+        aliases = [_path_aliases(path, canonical) for path, canonical in zip(paths, resolved)]
+        protected = {PROJECT_ROOT, Path(os.getenv("SPI_STATE_DIR", "state"))}
+        cwd = Path.cwd()
+        checkout = next((parent for parent in (cwd, *cwd.parents) if (parent / ".git").exists()), None)
+        if checkout is not None:
+            protected.add(checkout)
+        for root in {PROJECT_ROOT, checkout} - {None}:
+            protected.update(root / name for name in ("src", "tests", "outputs", "data", "frontend_redezigned", "state"))
         protected_aliases = set().union(*(_path_aliases(path, path.resolve()) for path in protected))
-        if (_overlap(file_aliases, state_aliases)
-                or _overlap(file_aliases | state_aliases, protected_aliases)):
+        if any(_overlap(current, protected_aliases) or any(_overlap(current, other) for other in aliases[:index])
+               for index, current in enumerate(aliases)):
             raise ValueError("Upload paths must be separate from each other and protected paths")
-        if any(path.exists() and not path.is_dir() for path in (resolved_files, resolved_state)):
-            raise ValueError("Upload paths must be directories")
-        return cls(resolved_files, resolved_state, _positive_limit("SPI_UPLOAD_MAX_BYTES", DEFAULT_UPLOAD_MAX_BYTES),
-                   _positive_limit("SPI_UPLOAD_MAX_FILES", 100))
+        for path in resolved:
+            private_path(path, Path(), directory=True)
+        return cls(*resolved[:2], _positive_limit("SPI_UPLOAD_MAX_BYTES", DEFAULT_UPLOAD_MAX_BYTES),
+                   _positive_limit("SPI_UPLOAD_MAX_FILES", 100), resolved[2] if process_value else None)
 
     def _connect(self) -> sqlite3.Connection:
+        path = private_sqlite_path(self.state, Path("uploads.sqlite3"))
         self.state.mkdir(parents=True, exist_ok=True)
-        name = "uploads.sqlite3"
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            path = self.state / (name + suffix)
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                continue
-            if not S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise OSError("Unsafe upload database path")
-        connection = sqlite3.connect(self.state / name, timeout=15)
+        connection = sqlite3.connect(path, timeout=15)
         try:
             connection.execute("""CREATE TABLE IF NOT EXISTS uploads (
                 upload_id TEXT PRIMARY KEY, created_at TEXT NOT NULL, metadata TEXT NOT NULL
@@ -138,18 +167,24 @@ class UploadStore:
     def get(self, upload_id: str) -> StoredUpload | None:
         with closing(self._connect()) as db:
             row = db.execute("SELECT metadata FROM uploads WHERE upload_id = ?", (upload_id,)).fetchone()
-            return StoredUpload.model_validate_json(row[0]) if row else None
+            if not row:
+                return None
+            upload = StoredUpload.model_validate_json(row[0])
+            if upload.upload_id != upload_id:
+                raise ValueError("Upload catalog ID mismatch")
+            return upload
 
     def file(self, upload: StoredUpload) -> Path | None:
-        path = self.files / f"{upload.upload_id}.pdf"
+        if not re.fullmatch(UPLOAD_ID_PATTERN, upload.upload_id):
+            raise ValueError("Invalid upload ID")
         try:
-            info = path.lstat()
-        except FileNotFoundError:
+            path = private_path(self.files, Path(f"{upload.upload_id}.pdf"))
+        except UnsafePrivatePath:
             return None
-        return path if S_ISREG(info.st_mode) and info.st_nlink == 1 else None
+        return path if path.is_file() else None
 
     def save(self, source: BinaryIO, filename: str, domain: Domain) -> StoredUpload:
-        self.files.mkdir(parents=True, exist_ok=True)
+        private_path(self.files, Path(), directory=True).mkdir(parents=True, exist_ok=True)
         temporary = None
         published = None
         try:

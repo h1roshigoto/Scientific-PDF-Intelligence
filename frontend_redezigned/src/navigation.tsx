@@ -43,6 +43,7 @@ export type Route =
   | { view: 'home' }
   | { section: Section; view: 'list' }
   | { section: 'results'; view: 'detail' | 'pdf'; id: string }
+  | { section: 'documents'; view: 'upload-analysis'; uploadId: string; resultId: string | null }
   | { section: Section; view: 'document-pdf'; documentId: string; page: number }
   | { section: 'results'; view: 'not-found' };
 
@@ -57,6 +58,9 @@ export function parseRoute(url: URL): Route {
   if (!section) return { section: 'results', view: 'list' };
   if (rest.length || !['results', 'documents', 'checks', 'export'].includes(section)) return { section: 'results', view: 'not-found' };
   if (!item) return { section: section as Section, view: 'list' };
+  if (section === 'documents' && item === 'uploads' && /^[a-f0-9]{32}$/.test(action ?? '')) {
+    return { section, view: 'upload-analysis', uploadId: action, resultId: searchParams.get('evidence') };
+  }
   if (section === 'results' && (!action || action === 'source') && decoded(item)) {
     return { section, view: action ? 'pdf' : 'detail', id: decoded(item) };
   }
@@ -65,6 +69,10 @@ export function parseRoute(url: URL): Route {
     if (Number.isSafeInteger(page) && page > 0) return { section, view: 'document-pdf', documentId: decoded(item), page };
   }
   return { section: 'results', view: 'not-found' };
+}
+
+export function uploadAnalysisUrl(id: string, evidence?: string) {
+  return `/documents/uploads/${encodeURIComponent(id)}${evidence ? `?${new URLSearchParams({ evidence })}` : ''}`;
 }
 
 export function getFilters(params: URLSearchParams): Filters {

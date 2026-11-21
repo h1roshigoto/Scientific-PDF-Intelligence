@@ -107,10 +107,12 @@ def preview(paths, domain, store):
 
 
 class Generation:
-    def __init__(self, complete, max_requests=None, completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS):
+    def __init__(self, complete, max_requests=None, completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS,
+                 retry_invalid_completion=False):
         self.complete = complete
         self.limit = max_requests
         self.completion_max_tokens = completion_max_tokens
+        self.retry_invalid_completion = retry_invalid_completion
         self.calls = 0
         self.events = []
 
@@ -154,6 +156,8 @@ class Generation:
                     "completion": event}
         except ValidationError:
             event["error"] = "invalid_schema"
+            if self.retry_invalid_completion:
+                return {"status": "pending", "error": "completion:invalid_schema", "page": fragment.page}
             return {"status": "review", "issues": ["invalid_schema"], "page": fragment.page}
         finally:
             if attempted and event.get("requested_max_tokens") is None:
@@ -223,13 +227,14 @@ def _plan_model_fragments(fragments, saved):
     return planned
 
 
-def _process(store, path, domain, generation, previous, *, prioritize_cell=None):
+def _process(store, path, domain, generation, previous, *, prioritize_cell=None, content=None):
     pid = f"{domain}:{path.stem}"
     record = {"document_id": pid, "path": str(path), "domain": domain,
               "status": "running", "sha256": None, "page_count": None, "pages": [],
               "pages_needing_ocr": [], "errors": [], "fragments": {}}
     try:
-        content = path.read_bytes()
+        if content is None:
+            content = path.read_bytes()
         digest = sha256(content).hexdigest()
         mode = "local" if generation.complete is None else "gigachat"
         schema_version = SCHEMA_VERSIONS[domain]
@@ -338,9 +343,12 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None)
 
 
 def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False,
-              completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS, prioritize_cell=None):
+              completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS, prioritize_cell=None, pdf_content=None,
+              retry_invalid_completion=False):
     if prioritize_cell and (local_only or len(paths) != 1):
         raise ValueError("Prioritizing a source cell requires a model batch of exactly one PDF")
+    if pdf_content is not None and len(paths) != 1:
+        raise ValueError("Supplying PDF bytes requires exactly one PDF")
     with ExitStack() as stack:
         try:
             stack.enter_context(store.batch_lock())
@@ -357,7 +365,8 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
                 client = stack.enter_context(GigaChatClient(**options))
             return client.complete_json(prompt, schema=None if json_only else schema, max_tokens=completion_max_tokens)
 
-        generation = Generation(None if local_only else complete or live, max_requests, completion_max_tokens)
+        generation = Generation(None if local_only else complete or live, max_requests, completion_max_tokens,
+                                retry_invalid_completion)
         prior = {r["document_id"]: r for r in store.batch_documents(domain)}
         selected = {f"{domain}:{path.stem}" for path in paths}
         # Register every selected PDF before the first expensive operation.
@@ -367,5 +376,5 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
                 _checkpoint(store, {"document_id": pid, "path": str(path), "domain": domain, "status": "pending"})
         for path in paths:
             _process(store, path, domain, generation, prior.get(f"{domain}:{path.stem}"),
-                     prioritize_cell=prioritize_cell)
+                     prioritize_cell=prioritize_cell, content=pdf_content)
         return report(store, domain, selected, requests=generation.events)

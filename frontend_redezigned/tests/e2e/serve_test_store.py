@@ -1,11 +1,14 @@
 """Serve the production API with a fresh, synthetic Store for Playwright."""
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pymupdf
 import uvicorn
+from fastapi.responses import FileResponse
 
 from spi.models import ResultRecord, ValidationIssue
 from spi.storage import Store
@@ -57,14 +60,42 @@ def seed(root: Path) -> Store:
     return store
 
 
+def processing_fixture(path: Path) -> None:
+    with pymupdf.open() as pdf:
+        pdf.new_page().insert_text((45, 70), "Synthetic processing fixture")
+        page = pdf.new_page()
+        page.insert_text((45, 70), "Table 1. Our measurements under simulated AM 1.5G of 100 mW/cm2")
+        for y, cells in [(90, ("Sample", "Voc (mV)", "PCE (%)")),
+                         (107, ("A1", "1200", "15.5")), (124, ("B1", "1200", "15.6"))]:
+            for x, value in zip((45, 135, 215), cells):
+                offset = pymupdf.get_text_length(value) / 2 if x > 50 else 0
+                page.insert_text((x - offset, y), value)
+        pdf.save(path)
+
+
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="spi-playwright-") as folder:
         root = Path(folder)
         store = seed(root)
         os.environ.update(
             SPI_STATE_DIR=str(store.root), SPI_RUN_ID="playwright-e2e",
-            SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN="synthetic-playwright-token",
+            SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN="synthetic-playwright-token-0123456789",
             SPI_UPLOAD_DIR=str(root / "uploads"), SPI_UPLOAD_STATE_DIR=str(root / "upload-state"),
+            SPI_UPLOAD_PROCESS_STATE_DIR=str(root / "processing"), SPI_UPLOAD_PROCESS_GIGACHAT="false",
+            SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS="8",
             SPI_UPLOAD_MAX_BYTES="16384", SPI_UPLOAD_MAX_FILES="20",
         )
-        uvicorn.run("spi.api:app", host="127.0.0.1", port=8182)
+        from spi.api import app
+
+        fixture = root / "processing-fixture.pdf"
+        processing_fixture(fixture)
+
+        @app.get("/__test/processing-fixture.pdf", include_in_schema=False)
+        def fixture_pdf():
+            return FileResponse(fixture, media_type="application/pdf")
+
+        with subprocess.Popen([sys.executable, "-m", "spi.upload_worker"]) as worker:
+            try:
+                uvicorn.run(app, host="127.0.0.1", port=8182)
+            finally:
+                worker.terminate()

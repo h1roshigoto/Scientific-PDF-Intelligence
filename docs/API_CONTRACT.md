@@ -28,9 +28,10 @@ endpoint reads stored JSON files directly. It is a historical artifact reader.
 
 ## Private PDF uploads
 
-All four routes require `Authorization: Bearer <token>`. The browser uses
+All upload routes require `Authorization: Bearer <token>`. The browser uses
 the same-origin Vite proxy, so it calls `/api/uploads`. Set
-`SPI_UPLOAD_ENABLED=true` and a server-only `SPI_UPLOAD_TOKEN` to enable access.
+`SPI_UPLOAD_ENABLED=true` and a server-only `SPI_UPLOAD_TOKEN` of at least
+32 characters. Generate it with `secrets.token_urlsafe(32)`.
 
 | Route | Success response |
 | --- | --- |
@@ -38,6 +39,10 @@ the same-origin Vite proxy, so it calls `/api/uploads`. Set
 | `GET /uploads` | `200 OK` with an array of metadata, newest first, and `X-SPI-Upload-Max-Bytes` |
 | `GET /uploads/{upload_id}` | `200 OK` with metadata |
 | `GET /uploads/{upload_id}/file` | `200 OK` with the original bytes as an `application/pdf` attachment |
+| `POST /uploads/{upload_id}/process` | `202 Accepted` with `upload_id`, `job_id`, and `status`. The request has no body. |
+| `GET /uploads/{upload_id}/processing` | `200 OK` with the processing status, current step, and diagnostics |
+| `GET /uploads/{upload_id}/results` | `200 OK` with an array of private scientific result records |
+| `GET /uploads/{upload_id}/issues` | `200 OK` with an array of private validation and extraction issues |
 
 Submit `multipart/form-data` with exactly one `file` and one `domain`
 (`solar` or `rag`). Validity is checked from the file bytes regardless of
@@ -63,24 +68,44 @@ Metadata fields are `upload_id` (32 hexadecimal characters), `domain`,
 | `415` | Request is missing the multipart media type |
 | `422` | Invalid fields, ID format, or PDF (empty, missing signature, damaged, encrypted, or zero pages) |
 | `500` | Upload storage failure |
-| `503` | Uploads disabled or configuration invalid |
+| `503` | `uploads_disabled`, `uploads_misconfigured` (including invalid token configuration), or `upload_processing_unconfigured` |
 
 `SPI_UPLOAD_DIR` holds originals named `<upload_id>.pdf`.
-`SPI_UPLOAD_STATE_DIR` holds the `uploads.sqlite3` metadata index. Both
-directories must be configured explicitly. Ancestor and descendant overlaps
-with each other or with protected paths are rejected, including resolved
-symlinks and junctions. The original and its metadata remain available after
-the server restarts with the same directories.
+`SPI_UPLOAD_STATE_DIR` holds the `uploads.sqlite3` metadata index.
+`SPI_UPLOAD_PROCESS_STATE_DIR` holds the processing queue, cross-process
+locks and the scientific Store for each `upload_id`. Use three disjoint
+directories outside the Git checkout and `SPI_STATE_DIR`. Ancestor and
+descendant overlaps are rejected after checking lexical and resolved paths,
+including symlinks and junctions. Keep the same directories across restarts.
 
-`stored` means the original passed technical checks and was saved. Scientific
-extraction, OCR, scope review and verification are separate operations.
-The existing registry, results, exports, and project passport read the
-scientific Store independently. The planned processing contract will use
-`stored → queued → processing → needs_review / completed / failed` after an
-explicit authorized request. A separate worker will bind jobs to the upload ID,
-domain and SHA-256 and call the existing `pdf.py`, batch, OCR and GigaChat
-stages against processing state dedicated to user uploads. Scientific
-verification will continue to require its existing evidence and review checks.
+`stored` confirms that the PDF passed technical upload checks. Its analysis
+starts at `not_started`. An explicit POST creates a `queued` job, and a
+separate worker moves it to `processing` and then to `completed`,
+`needs_review` or `failed`. Duplicate POSTs return the existing job ID and
+current status. If `retry_allowed` is true, the next POST creates a new job ID
+and reuses compatible checkpoints. A worker restart resumes an interrupted job
+with its existing ID once the previous worker's SQLite lock is released.
+
+The status endpoint returns `step`, `updated_at` (UTC ISO 8601), `diagnostic`,
+`retry_allowed`, `mode` (local or GigaChat), `coverage`, `recoveries`,
+`human_review_required`, and available `counts` and `pages`. Counts stay null
+until the worker has a checkpoint summary. Page state and `pages_needing_ocr`
+identify pending recognition, which this worker does not perform. Model
+timeouts, incomplete page analysis and request-budget exhaustion are retryable
+and can leave partial results. Missing credentials with GigaChat enabled fall
+back to local extraction for a new job.
+
+Results use the existing scientific record contract with
+`document_id = "<domain>:<upload_id>"`, SHA-256, metric, raw and normalized
+values, evidence, table context and original primary/cited classification.
+The original display filename stays in upload metadata. The issue records
+include scientific validation issues and unresolved layout, fragment and page
+diagnostics. Available results and issues come from the latest finished
+attempt, including partial checkpoints with a summary. While an attempt is
+queued or running these endpoints return empty arrays. `completed` marks
+technical completion. Private records retain `extracted` or `needs_review`
+until human verification. The public registry, results, exports and project
+passport continue to read the official scientific Store.
 The Windows setup and the requirements for public deployment are in the
 [demo runbook](DEMO_RUNBOOK.md#приватная-загрузка-pdf).
 

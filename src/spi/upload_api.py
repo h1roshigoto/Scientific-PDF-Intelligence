@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 import sqlite3
 from secrets import compare_digest
 from typing import Annotated
@@ -10,7 +9,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import ValidationError
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
 from starlette.concurrency import run_in_threadpool
@@ -18,8 +16,10 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 
-from .models import UPLOAD_ID_PATTERN, StoredUpload
-from .upload_store import InvalidPdf, UploadQuotaFull, UploadStore, UploadTooLarge
+from .models import UPLOAD_ID_PATTERN, ResultRecord, StoredUpload, UploadJobAccepted, UploadProcessing, ValidationIssue
+from .upload_processing import UploadProcessingStore
+from .upload_queue import UploadQueue
+from .upload_store import InvalidPdf, UploadQuotaFull, UploadStore, UploadTooLarge, upload_token
 
 router = APIRouter(prefix="/uploads", tags=["private uploads"], responses={
     401: {"description": "Missing or invalid bearer token"},
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/uploads", tags=["private uploads"], responses={
 logger = logging.getLogger(__name__)
 bearer = HTTPBearer(auto_error=False)
 NO_STORE = {"Cache-Control": "no-store"}
-STORAGE_ERRORS = (OSError, sqlite3.Error, ValidationError)
+STORAGE_ERRORS = (OSError, sqlite3.Error, ValueError)
 MULTIPART_OVERHEAD = 64 * 1024
 UploadId = Annotated[str, Path(pattern=UPLOAD_ID_PATTERN)]
 
@@ -44,9 +44,10 @@ def _authorized_store(
 ) -> UploadStore:
     if os.getenv("SPI_UPLOAD_ENABLED", "").strip().lower() not in {"1", "true"}:
         raise _error(503, "uploads_disabled")
-    token = os.getenv("SPI_UPLOAD_TOKEN", "")
-    if not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", token):
-        raise _error(503, "uploads_misconfigured")
+    try:
+        token = upload_token()
+    except ValueError as exc:
+        raise _error(503, "uploads_misconfigured") from exc
     if credentials is None or not compare_digest(credentials.credentials.encode(), token.encode()):
         raise _error(401, "upload_unauthorized")
     try:
@@ -194,3 +195,62 @@ def upload_file(upload_id: UploadId, uploads: PrivateStore) -> FileResponse:
         raise _error(404, "upload_not_found")
     return FileResponse(path, media_type="application/pdf", filename=f"{upload_id}.pdf",
                         headers={**NO_STORE, "X-Content-Type-Options": "nosniff"})
+
+
+def _queue(uploads: UploadStore) -> UploadQueue:
+    if uploads.processing is None:
+        raise _error(503, "upload_processing_unconfigured")
+    return UploadQueue(uploads.processing)
+
+
+@router.post("/{upload_id}/process", status_code=202, response_model=UploadJobAccepted)
+def process_upload(upload_id: UploadId, response: Response, uploads: PrivateStore) -> UploadJobAccepted:
+    upload = _get_upload(upload_id, uploads)
+    try:
+        state = _queue(uploads).enqueue(upload).processing
+    except STORAGE_ERRORS as exc:
+        raise _error(500, "upload_processing_storage_error") from exc
+    response.headers.update(NO_STORE)
+    return UploadJobAccepted(upload_id=upload_id, job_id=state.job_id, status=state.status)
+
+
+@router.get("/{upload_id}/processing", response_model=UploadProcessing)
+def upload_processing(upload_id: UploadId, response: Response, uploads: PrivateStore) -> UploadProcessing:
+    _get_upload(upload_id, uploads)
+    try:
+        job = _queue(uploads).get(upload_id)
+    except STORAGE_ERRORS as exc:
+        raise _error(500, "upload_processing_storage_error") from exc
+    response.headers.update(NO_STORE)
+    return job.processing if job else UploadProcessing(upload_id=upload_id, status="not_started")
+
+
+def _scientific_data(upload_id: str, uploads: UploadStore, *, issues: bool) -> list:
+    upload = _get_upload(upload_id, uploads)
+    queue = _queue(uploads)
+    try:
+        job = queue.get(upload_id)
+        if job is None or not job.matches(upload) or job.processing.counts is None:
+            return []
+        store = UploadProcessingStore(queue.root, upload)
+        record = store.checkpoint()
+        if record is None:
+            raise ValueError("Missing private checkpoint for a finished job")
+        rows = store.upload_issues(record)[0] if issues else store.upload_results()
+        current = queue.get(upload_id)
+        # A concurrent retry can supersede a finished attempt while reading its Store.
+        return rows if current and current.processing.job_id == job.processing.job_id else []
+    except STORAGE_ERRORS as exc:
+        raise _error(500, "upload_processing_storage_error") from exc
+
+
+@router.get("/{upload_id}/results", response_model=list[ResultRecord])
+def upload_results(upload_id: UploadId, response: Response, uploads: PrivateStore):
+    response.headers.update(NO_STORE)
+    return _scientific_data(upload_id, uploads, issues=False)
+
+
+@router.get("/{upload_id}/issues", response_model=list[ValidationIssue])
+def upload_issues(upload_id: UploadId, response: Response, uploads: PrivateStore):
+    response.headers.update(NO_STORE)
+    return _scientific_data(upload_id, uploads, issues=True)
