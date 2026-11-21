@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import type { APIRequestContext, Page } from '@playwright/test';
@@ -10,6 +11,15 @@ const token = 'synthetic-playwright-token-0123456789';
 const headers = { Authorization: `Bearer ${token}` };
 const savedMessage = 'Файл сохранён.';
 const panel = (page: Page) => page.getByRole('region', { name: 'Мои загрузки' });
+const exportPanel = (page: Page) => page.getByRole('region', { name: 'Экспорт научного проекта' });
+
+async function downloadProject(page: Page, format: 'CSV' | 'JSON' | 'PDF' | 'ZIP', filename: string) {
+  const download = page.waitForEvent('download');
+  await exportPanel(page).getByRole('button', { name: 'Скачать ' + format }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe(filename);
+  return file.path();
+}
 
 async function syntheticPdf(request: APIRequestContext, domain: 'solar' | 'rag') {
   const response = await request.get(`/api/documents/${domain}%3AD001/file`);
@@ -135,8 +145,8 @@ test('signs in, validates, retries, persists and opens an uploaded Solar PDF', a
   await expect(row).toBeVisible();
 });
 
-test('reviews real local extraction, keeps history after sign-in, and recovers from a revision conflict', async ({ page, request }) => {
-  test.setTimeout(45_000);
+test('reviews and exports real local extraction, keeps history after sign-in, and recovers from a revision conflict', async ({ page, request }) => {
+  test.setTimeout(60_000);
   const fixture = await request.get('/api/__test/processing-fixture.pdf');
   expect(fixture.ok()).toBe(true);
   const pdf = await fixture.body();
@@ -237,6 +247,50 @@ test('reviews real local extraction, keeps history after sign-in, and recovers f
   await expect(history.getByText('Сопоставление с измерительным протоколом требует повторной сверки.')).toBeVisible();
   const rejectedId = new URL(page.url()).searchParams.get('evidence');
   await back();
+  const exports = exportPanel(page);
+  await expect(exports).toContainText('Подтверждено исходных — 1');
+  await expect(exports).toContainText('Подтверждено исправленных — 1');
+  await expect(exports).toContainText('Отклонено — 1');
+  await expect(exports).toContainText('Ожидают решения — 1');
+  await expect(exports).toContainText('Устарело — 0');
+  await expect(exports).toContainText('Научная полнота не подтверждена');
+
+  const zipName = 'spi-project-solar-' + entry.upload_id + '.zip';
+  const zipRoute = '**/export/project.zip';
+  await page.route(zipRoute, (route) => route.fulfill({ status: 500, json: { detail: 'upload_export_storage_error' } }),
+    { times: 1 });
+  await exports.getByRole('button', { name: 'Скачать ZIP' }).click();
+  await expect(exports.getByRole('alert')).toContainText('Сервер не смог подготовить экспорт');
+  const csv = await downloadProject(page, 'CSV', 'reviewed_results.csv');
+  const json = await downloadProject(page, 'JSON', 'reviewed_results.json');
+  const pdfPassport = await downloadProject(page, 'PDF', 'scientific-passport.pdf');
+  const zipRequests: string[] = [];
+  page.on('request', (req) => {
+    if (new URL(req.url()).pathname.endsWith('/export/project.zip')) zipRequests.push(req.url());
+  });
+  let releaseZip!: () => void;
+  const delayed = new Promise<void>((resolve) => { releaseZip = resolve; });
+  await page.route(zipRoute, async (route) => {
+    await delayed;
+    await route.continue();
+  }, { times: 1 });
+  const firstZip = page.waitForEvent('download');
+  const zipRequest = page.waitForRequest((req) => new URL(req.url()).pathname.endsWith('/export/project.zip'));
+  try {
+    await exports.getByRole('button', { name: 'Скачать ZIP' }).dblclick();
+    await expect(exports.getByRole('status')).toContainText('Подготавливается ZIP');
+    await expect(exports.getByRole('button', { name: 'Скачать ZIP' })).toBeDisabled();
+  } finally {
+    releaseZip();
+  }
+  const zipHeaders = await (await zipRequest).allHeaders();
+  expect(zipHeaders.authorization).toBe(headers.Authorization);
+  expect(zipHeaders['x-spi-snapshot-sha256']).toMatch(/^[a-f0-9]{64}$/);
+  const zipDownload = await firstZip;
+  expect(zipDownload.suggestedFilename()).toBe(zipName);
+  const zip = await zipDownload.path();
+  expect(zipRequests).toHaveLength(1);
+
   await open('15.5 %');
 
   await page.setViewportSize({ width: 390, height: 844 });
@@ -252,6 +306,13 @@ test('reviews real local extraction, keeps history after sign-in, and recovers f
   await back();
   await expect(page.getByText('Анализ завершён', { exact: true })).toBeVisible();
   await expect(results.getByRole('listitem')).toHaveCount(4);
+  const reopened = await downloadProject(page, 'ZIP', zipName);
+  expect(zipRequests.every((url) => !url.includes(token))).toBe(true);
+  expect(await page.evaluate(() => JSON.stringify({
+    local: { ...localStorage }, session: { ...sessionStorage }, cookies: document.cookie,
+  }))).not.toContain(token);
+  expect(execFileSync('python', ['tests/e2e/check_private_export.py', zip, csv, json, pdfPassport, reopened, rejectedId!],
+    { encoding: 'utf8' })).toContain('PASS: 6 files verified by SHA-256');
   const filter = page.getByLabel('Статус проверки');
   await filter.selectOption('approved');
   await expect(results.getByRole('listitem')).toHaveCount(2);

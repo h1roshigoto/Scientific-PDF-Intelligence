@@ -114,6 +114,9 @@ class _Report:
     pale = (0.94, 0.97, 0.97)
     size = 9
     leading = 13
+    header_label = "ПАСПОРТ ПРОЕКТА"
+    header_width = 106
+    data_label = "Данные Store"
 
     def __init__(self, pdf):
         self.pdf = pdf
@@ -132,7 +135,7 @@ class _Report:
         self.writer = pymupdf.TextWriter(self.page.rect)
         self.page.draw_line((self.margin, 45), (self.right, 45), color=self.rule)
         self._text(self.margin, 33, "SCIENTIFIC PDF INTELLIGENCE", 9, self.bold)
-        self._text(self.right - 106, 33, "ПАСПОРТ ПРОЕКТА", 8, self.bold)
+        self._text(self.right - self.header_width, 33, self.header_label, 8, self.bold)
         self.y = 61
 
     def _text(self, x, y, text, size, font):
@@ -210,7 +213,7 @@ class _Report:
     def _table_header(self):
         self.page.draw_rect((self.margin, self.y, self.right, self.y + 19), color=None, fill=self.pale)
         self._text(self.margin + 6, self.y + 13, "Поле", self.size, self.bold)
-        self._text(self.divider + 7, self.y + 13, "Данные Store", self.size, self.bold)
+        self._text(self.divider + 7, self.y + 13, self.data_label, self.size, self.bold)
         self.y += 19
 
     def table(self, caption):
@@ -255,7 +258,7 @@ class _Report:
             self.page.draw_line((self.margin, self.y), (self.right, self.y), color=self.rule, width=0.5)
             offset = end
 
-    def finish(self):
+    def finish(self, *, no_new_id=False):
         self._flush()
         self.pdf.set_toc(self.contents)
         for index, page in enumerate(self.pdf, 1):
@@ -265,7 +268,7 @@ class _Report:
                           fontsize=8, font=self.regular)
             writer.write_text(page, color=self.muted)
         # TextWriter can embed separate copies of a fallback font on many pages.
-        return self.pdf.tobytes(garbage=4, deflate=True)
+        return self.pdf.tobytes(garbage=4, deflate=True, no_new_id=no_new_id)
 
 
 def _rows(report, fields):

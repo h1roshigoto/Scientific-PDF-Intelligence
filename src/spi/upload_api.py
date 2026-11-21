@@ -3,18 +3,19 @@
 import logging
 import os
 import sqlite3
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from secrets import compare_digest
+from tempfile import TemporaryFile
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
-from starlette.concurrency import run_in_threadpool
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -22,6 +23,8 @@ from starlette.requests import ClientDisconnect
 
 from .models import UPLOAD_ID_PATTERN, ResultRecord, StoredUpload, UploadJobAccepted, UploadProcessing, ValidationIssue
 from .review_models import ReviewDetail, ReviewedResult, ReviewEvent, ReviewOverview, ReviewRequest
+from .upload_export import archive_filename, build_archive, build_artifact, capture_snapshot
+from .upload_export_models import ManifestPreview
 from .upload_processing import UploadProcessingStore
 from .upload_queue import UploadQueue
 from .upload_reviews import ReviewError, UploadReviews
@@ -262,7 +265,9 @@ def upload_issues(upload_id: UploadId, response: Response, uploads: PrivateStore
     return _scientific_data(upload_id, uploads, issues=True)
 
 
-class _ReviewRoute(APIRoute):
+class _PrivateRoute(APIRoute):
+    invalid_request = "invalid_review_request"
+
     def get_route_handler(self):
         handle = super().get_route_handler()
 
@@ -270,7 +275,7 @@ class _ReviewRoute(APIRoute):
             try:
                 return await handle(request)
             except RequestValidationError as exc:
-                raise _error(422, "invalid_review_request") from exc
+                raise _error(422, self.invalid_request) from exc
             except StarletteHTTPException as exc:
                 exc.headers = {**(exc.headers or {}), **NO_STORE}
                 raise
@@ -278,7 +283,7 @@ class _ReviewRoute(APIRoute):
         return review_request
 
 
-review_router = APIRouter(route_class=_ReviewRoute)
+review_router = APIRouter(route_class=_PrivateRoute)
 ResultId = Annotated[str, Path(min_length=1, max_length=256)]
 
 
@@ -329,3 +334,100 @@ def reviewed_results(upload_id: UploadId, response: Response, uploads: PrivateSt
 
 
 router.include_router(review_router)
+
+
+class _ExportRoute(_PrivateRoute):
+    invalid_request = "invalid_export_request"
+
+
+export_router = APIRouter(prefix="/{upload_id}/export", route_class=_ExportRoute, responses={
+    409: {"description": "Analysis unavailable, active or changed, or source no longer matches"},
+    413: {"description": "Snapshot or artifact exceeds the export limits"},
+})
+SnapshotHeader = Annotated[str | None, Header(alias="X-SPI-Snapshot-SHA256", pattern=r"^[a-f0-9]{64}$")]
+
+
+@contextmanager
+def _export_operation():
+    try:
+        yield
+    except ReviewError as exc:
+        raise _error(exc.status, exc.code) from exc
+    except (*STORAGE_ERRORS, RuntimeError) as exc:
+        logger.error("Private export operation failed (%s)", type(exc).__name__)
+        raise _error(500, "upload_export_storage_error") from exc
+
+
+def _snapshot(upload_id, uploads, expected=None):
+    upload = _get_upload(upload_id, uploads)
+    queue = _queue(uploads)
+    return capture_snapshot(uploads, upload, queue, expected=expected)
+
+
+def _attachment(snapshot, filename, *, disposition="attachment"):
+    return {
+        **NO_STORE, "X-Content-Type-Options": "nosniff",
+        "X-SPI-Snapshot-SHA256": snapshot.preview.metadata.snapshot_sha256,
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
+    }
+
+
+@export_router.get("/manifest", response_model=ManifestPreview)
+def export_preview(upload_id: UploadId, response: Response, uploads: PrivateStore):
+    with _export_operation():
+        snapshot = _snapshot(upload_id, uploads)
+        response.headers.update(_attachment(snapshot, "manifest-preview.json", disposition="inline"))
+        return snapshot.preview
+
+
+def _download(upload_id, uploads, expected, name):
+    with _export_operation():
+        snapshot = _snapshot(upload_id, uploads, expected)
+        artifact = build_artifact(snapshot, name)
+        return Response(artifact.content, media_type=artifact.media_type,
+                        headers=_attachment(snapshot, artifact.filename))
+
+
+@export_router.get("/reviewed-results.csv", response_class=Response, responses={200: {"content": {"text/csv": {}}}})
+def export_csv(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "reviewed_results.csv")
+
+
+@export_router.get("/reviewed-results.json", response_class=Response,
+                   responses={200: {"content": {"application/json": {}}}})
+def export_json(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "reviewed_results.json")
+
+
+@export_router.get("/scientific-passport.pdf", response_class=Response,
+                   responses={200: {"content": {"application/pdf": {}}}})
+def export_private_passport(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "scientific-passport.pdf")
+
+
+class _ProjectResponse(StreamingResponse):
+    def __init__(self, snapshot):
+        self.snapshot = snapshot
+        headers = _attachment(snapshot, archive_filename(snapshot.preview.metadata))
+        super().__init__(iter(()), media_type="application/zip", headers=headers)
+
+    async def __call__(self, scope, receive, send):
+        # Scope the unnamed temporary file to the ASGI response, including a
+        # client disconnect. Generation errors occur before headers are sent.
+        with ExitStack() as resources:
+            with _export_operation():
+                output = resources.enter_context(TemporaryFile(mode="w+b"))
+                size = await run_in_threadpool(build_archive, self.snapshot, output)
+            self.headers["Content-Length"] = str(size)
+            self.body_iterator = iterate_in_threadpool(iter(lambda: output.read(64 * 1024), b""))
+            await super().__call__(scope, receive, send)
+
+
+@export_router.get("/project.zip", response_class=StreamingResponse,
+                   responses={200: {"content": {"application/zip": {}}}})
+def export_project(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
+    with _export_operation():
+        return _ProjectResponse(_snapshot(upload_id, uploads, snapshot))
+
+
+router.include_router(export_router)

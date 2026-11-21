@@ -138,7 +138,8 @@ pnpm.cmd dev --host 127.0.0.1 --port 5173 --strictPort
 5. В блоке «Ручная проверка» отметьте сверку значения, единицы и контекста. Если есть научные замечания, ознакомьтесь с ними и отметьте, что учли их. Нажмите «Подтвердить исходное».
 6. Для другой записи откройте «Предложить исправление». Укажите изменённые поля и обоснование по PDF, проверьте «Было → Стало» и сохраните предложение. Сверьте предложенную версию с указанной страницей, затем нажмите «Подтвердить исправление».
 7. Чтобы отклонить запись, укажите причину и нажмите «Отклонить». Статусы и фильтры доступны в списке научных записей. В карточке раскройте события раздела «История решений» для просмотра исходного evidence, причины и номера ревизии.
-8. Перезагрузите страницу и введите токен снова. Решения, замечания и история доступны после перезапуска браузера, FastAPI и worker с прежними приватными каталогами.
+8. Вернитесь к списку результатов. В блоке «Экспорт научного проекта» проверьте числа подтверждённых, ожидающих, отклонённых и устаревших записей, сведения об OCR и ограничения охвата. Скачайте CSV, JSON, PDF или полный ZIP. Если рецензия или анализ изменились, нажмите «Обновить данные экспорта».
+9. Перезагрузите страницу, введите токен снова и скачайте архив повторно. Решения, замечания и история доступны после перезапуска браузера, FastAPI и worker с прежними приватными каталогами.
 
 Локальный режим использует PyMuPDF и существующие правила извлечения из таблиц
 Solar и RAG. Страницы без текстового слоя, требующие OCR, остаются
@@ -152,7 +153,7 @@ Solar и RAG. Страницы без текстового слоя, требу�
 посмотрите последнее решение и повторите сверку. Пока идёт новый анализ,
 сохранение блокируется. Новый ID задания делает предыдущие решения
 устаревшими даже для совпадающего значения. В истории остаются прежние
-события. Актуальный набор для будущего экспорта отдаёт отдельный маршрут
+события. Актуальный набор для программной работы отдаёт отдельный маршрут
 `GET /uploads/{upload_id}/reviewed-results` с bearer-токеном.
 
 Ctrl+C останавливает worker. После запуска той же командой задачи в очереди
@@ -162,6 +163,45 @@ Ctrl+C останавливает worker. После запуска той же 
 Если причина в SHA-256 или отсутствующем оригинале, сначала восстановите
 исходный файл. Для одноразового запуска доступно
 `python -m spi.upload_worker --once`.
+
+### Скачать и проверить частный проект из PowerShell
+
+В отдельной вкладке PowerShell используйте тот же токен, что в интерфейсе.
+Возьмите ID из адреса `/documents/uploads/{upload_id}` на странице результатов или из
+ответа `GET /uploads`. Каталог назначения должен оставаться приватным.
+
+~~~powershell
+$spiSecret = Read-Host 'Токен приватной загрузки' -AsSecureString
+$spiHeaders = @{ Authorization = 'Bearer ' + [System.Net.NetworkCredential]::new('', $spiSecret).Password }
+Remove-Variable spiSecret
+$spiUploadId = Read-Host 'ID загрузки'
+$spiExport = "http://127.0.0.1:8000/uploads/$spiUploadId/export"
+$spiTarget = Join-Path $env:LOCALAPPDATA 'ScientificPDFIntelligence\downloads'
+New-Item -Path $spiTarget -ItemType Directory -Force | Out-Null
+
+try {
+    $spiPreview = Invoke-RestMethod -Uri "$spiExport/manifest" -Headers $spiHeaders -ErrorAction Stop
+    $spiPreview.validation | ConvertTo-Json -Depth 8
+    $spiHeaders['X-SPI-Snapshot-SHA256'] = $spiPreview.metadata.snapshot_sha256
+    Invoke-WebRequest -Uri "$spiExport/reviewed-results.csv" -Headers $spiHeaders -OutFile (Join-Path $spiTarget 'reviewed_results.csv') -ErrorAction Stop
+    Invoke-WebRequest -Uri "$spiExport/reviewed-results.json" -Headers $spiHeaders -OutFile (Join-Path $spiTarget 'reviewed_results.json') -ErrorAction Stop
+    Invoke-WebRequest -Uri "$spiExport/scientific-passport.pdf" -Headers $spiHeaders -OutFile (Join-Path $spiTarget 'scientific-passport.pdf') -ErrorAction Stop
+    $spiArchive = Join-Path $spiTarget "spi-project-$($spiPreview.metadata.domain)-$spiUploadId.zip"
+    Invoke-WebRequest -Uri "$spiExport/project.zip" -Headers $spiHeaders -OutFile $spiArchive -ErrorAction Stop
+    python -m spi.upload_export_verify $spiArchive
+    if ($LASTEXITCODE -ne 0) { throw 'Проверка ZIP не пройдена' }
+    Get-FileHash -LiteralPath $spiArchive -Algorithm SHA256
+} finally {
+    Remove-Variable spiHeaders
+}
+~~~
+
+На `409` дождитесь завершения активного задания или обновите предпросмотр.
+Пакет без подтверждений доступен для аудита и содержит CSV с заголовками.
+Замечания и страницы в ожидании OCR остаются в пакете после ручной проверки.
+Для анализа чисел и неизвестных значений используйте типизированный JSON.
+Архив содержит конфиденциальные сведения. Для официальной выгрузки
+применяйте отдельные схемы и научный gate. [Контракт частного экспорта](API_CONTRACT.md#private-project-export-v1)
 
 ### Опциональный GigaChat
 

@@ -86,6 +86,24 @@ class ReviewLog:
             rows = db.execute("SELECT event FROM review_events WHERE result_id = ? ORDER BY revision", (result_id,))
             return [ReviewEvent.model_validate_json(row[0]) for row in rows]
 
+    def all_events(self, max_bytes):
+        with self._connect() as db:
+            if db is None:
+                return []
+            # Read the size and the events from one SQLite read snapshot.
+            db.execute("BEGIN")
+            size = db.execute("SELECT COALESCE(SUM(length(CAST(event AS BLOB))), 0) FROM review_events").fetchone()[0]
+            if size > max_bytes:
+                raise ReviewError(413, "upload_export_too_large")
+            rows = db.execute("SELECT result_id, revision, event FROM review_events ORDER BY result_id, revision")
+            events = []
+            for result_id, revision, raw in rows:
+                event = ReviewEvent.model_validate_json(raw)
+                if event.revision != revision:
+                    raise ValueError("Review event revision mismatch")
+                events.append((result_id, event))
+            return events
+
     @contextmanager
     def transaction(self, result_id):
         with self._connect(write=True) as db:
@@ -106,17 +124,18 @@ def _decimal(value):
     raise ReviewError(422, "invalid_normalized_value")
 
 
-def _validate_normalization(original, result, explanation):
+def _validate_normalization(original, result, explanation, *, verify_unchanged=False):
     normalized = result.normalized
     if normalized.value is None:
         if normalized.unit is not None:
             raise ReviewError(422, "invalid_normalized_value")
         return
     protocol_keys = ("evaluation_protocol", "metric_definition")
-    if (all(getattr(original, field) == getattr(result, field) for field in ("normalized", "raw", "metric", "source"))
-            and all(original.context.get(key) == result.context.get(key) for key in protocol_keys)):
+    unchanged = (all(getattr(original, field) == getattr(result, field)
+                     for field in ("normalized", "raw", "metric", "source"))
+                 and all(original.context.get(key) == result.context.get(key) for key in protocol_keys))
+    if unchanged and not verify_unchanged:
         return
-
     value = _decimal(normalized.value)
     try:
         expected = normalize(str(result.raw.value), result.raw.unit or "", result.metric.name, result.domain)
@@ -124,6 +143,8 @@ def _validate_normalization(original, result, explanation):
         expected = None
     if expected is not None and (expected.unit != normalized.unit or _decimal(expected.value) != value):
         raise ReviewError(422, "inconsistent_normalization")
+    if unchanged:
+        return
     protocol = result.domain == "rag" and any(
         isinstance(result.context.get(key), str) and result.context[key].strip()
         for key in protocol_keys
@@ -138,6 +159,23 @@ def _validate_origin(result):
         raise ReviewError(422, "invalid_review_origin")
     if result.domain == "rag" and source.origin is None:
         raise ReviewError(422, "review_origin_required")
+
+
+def validate_reviewed_record(original, result, normalization_evidence, *, verify_unchanged=False):
+    if isinstance(result.raw.value, str) and not result.raw.value.strip():
+        raise ReviewError(422, "invalid_review_correction")
+    if not result.metric.name.strip() or any(unit is not None and not unit.strip()
+                                            for unit in (result.raw.unit, result.normalized.unit)):
+        raise ReviewError(422, "invalid_review_correction")
+    if "metric_k" in result.context:
+        raise ReviewError(422, "invalid_review_context")
+    json.dumps(result.context, allow_nan=False)
+    if result.domain == "rag" and (top_k := result.context.get("top_k")) is not None:
+        if not ((type(top_k) is int and top_k >= 0)
+                or (isinstance(top_k, str) and top_k.isascii() and top_k.isdecimal())):
+            raise ReviewError(422, "invalid_review_context")
+    _validate_origin(result)
+    _validate_normalization(original, result, normalization_evidence, verify_unchanged=verify_unchanged)
 
 
 def _correct(original, correction):
@@ -156,27 +194,14 @@ def _correct(original, correction):
     result = ResultRecord.model_validate(data)
     if result == original:
         raise ReviewError(422, "empty_review_correction")
-    if isinstance(result.raw.value, str) and not result.raw.value.strip():
-        raise ReviewError(422, "invalid_review_correction")
-    if not result.metric.name.strip() or any(unit is not None and not unit.strip()
-                                            for unit in (result.raw.unit, result.normalized.unit)):
-        raise ReviewError(422, "invalid_review_correction")
-    if "metric_k" in result.context:
-        raise ReviewError(422, "invalid_review_context")
-    json.dumps(result.context, allow_nan=False)
-    if result.domain == "rag" and (top_k := result.context.get("top_k")) is not None:
-        if not ((type(top_k) is int and top_k >= 0)
-                or (isinstance(top_k, str) and top_k.isascii() and top_k.isdecimal())):
-            raise ReviewError(422, "invalid_review_context")
-    _validate_origin(result)
-    _validate_normalization(original, result, correction.normalization_evidence)
+    validate_reviewed_record(original, result, correction.normalization_evidence)
     return result
 
 
 class UploadReviews:
     """One stable queue snapshot for a read or a complete review transaction."""
 
-    def __init__(self, uploads, upload, root, job, *, write=False):
+    def __init__(self, uploads, upload, root, job, *, write=False, verified_pdf=False):
         self.upload = upload
         self.processing = job.processing if job else UploadProcessing(upload_id=upload.upload_id, status="not_started")
         self.store = UploadProcessingStore(root, upload)
@@ -190,6 +215,9 @@ class UploadReviews:
             self.results = {result.result_id: result for result in self.store.upload_results()}
             self.issues = self.store.upload_issues(checkpoint)[0]
         self.pdf_content = None
+        if verified_pdf:
+            self.pdf_status = "valid"
+            return
         self.pdf_status = "missing"
         path = uploads.file(upload)
         if path is not None:
@@ -229,8 +257,9 @@ class UploadReviews:
         return ReviewState(result_id=result_id, original_result=original, basis=basis, status=status,
                            revision=decision.revision if decision else 0, applicable=applicable, decision=decision)
 
-    def _states(self):
-        events = {event.decision.result_id: event for event in self.log.current()}
+    def states(self, events=None):
+        if events is None:
+            events = {event.decision.result_id: event for event in self.log.current()}
         return [self._state(result_id, events.get(result_id)) for result_id in {**self.results, **events}]
 
     def _warnings(self, result_id, pages):
@@ -251,7 +280,7 @@ class UploadReviews:
 
     def overview(self):
         return ReviewOverview(processing=self.processing, pdf_status=self.pdf_status,
-                              reviews=self._states(), issues=self.issues)
+                              reviews=self.states(), issues=self.issues)
 
     def detail(self, result_id):
         return self._detail(self._state(result_id, self.log.latest(result_id)))
@@ -263,12 +292,14 @@ class UploadReviews:
             self._decision(event, result_id)
         return events
 
-    def reviewed_results(self):
+    def reviewed_results(self, states=None):
+        if states is None:
+            states = self.states()
         return [ReviewedResult(original_result=state.original_result,
                                reviewed_result=state.decision.reviewed_result or state.original_result,
                                decision=state.decision, issues=self._detail(state).issues,
                                ocr_pages=self.processing.pages_needing_ocr)
-                for state in self._states() if state.status in APPROVED]
+                for state in states if state.status in APPROVED]
 
     def save(self, result_id, request):
         if self.processing.status in ACTIVE:
