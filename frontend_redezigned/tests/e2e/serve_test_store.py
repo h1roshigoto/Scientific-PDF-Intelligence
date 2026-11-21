@@ -62,7 +62,9 @@ def seed(root: Path) -> Store:
 
 def processing_fixture(path: Path) -> None:
     with pymupdf.open() as pdf:
-        pdf.new_page().insert_text((45, 70), "Synthetic processing fixture")
+        first = pdf.new_page()
+        first.insert_text((45, 70), "Synthetic processing fixture")
+        first.insert_text((45, 90), "Erratum: B1 PCE was corrected from 15.6% to 15.7%.")
         page = pdf.new_page()
         page.insert_text((45, 70), "Table 1. Our measurements under simulated AM 1.5G of 100 mW/cm2")
         for y, cells in [(90, ("Sample", "Voc (mV)", "PCE (%)")),

@@ -92,6 +92,28 @@ blockquote mark { color: inherit; padding: 0 2px; margin: 0 -2px; background: li
 .upload-status, .upload-issues { overflow-wrap: anywhere; }
 .upload-preview { margin-top: 16px; }
 .upload-preview > button { margin-bottom: 8px; }
+.review-filters { margin-top: 12px; }
+.review-content > * + *, .review-form > * + *, .review-form fieldset > * + * { margin-top: 10px; }
+.review-content, .review-history { overflow-wrap: anywhere; }
+.review-form fieldset { min-width: 0; margin-inline: 0; padding: 10px 12px 12px; border: 1px solid var(--rule); border-radius: var(--r-control); }
+.review-form legend, .review-form summary { font-weight: 650; }
+.review-form summary, .review-history summary { cursor: pointer; }
+.review-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); gap: 10px; }
+.review-form details > :not(summary) { margin-top: 8px; }
+.review-form label { display: grid; min-width: 0; gap: 5px; font-weight: 600; }
+.review-form :is(input:not([type='checkbox']), textarea, select) { width: 100%; min-width: 0; padding: 8px; border: 1px solid var(--rule); border-radius: var(--r-control); font: inherit; font-weight: 400; background: var(--sheet); color: inherit; }
+.review-form textarea { resize: vertical; }
+.review-form .review-check { display: flex; align-items: start; gap: 8px; font-weight: 400; }
+.review-check input { margin-top: .35em; }
+.review-warnings { margin-top: 12px; }
+.review-history { margin: 0; padding-inline-start: 24px; }
+.review-history li + li { margin-top: 8px; }
+.review-history .info-list { padding-inline: 0; }
+.review-comparison { padding: 10px 12px; background: var(--mark); border-radius: var(--r-control); }
+.review-comparison dl { display: grid; gap: 6px; margin: 6px 0 0; }
+.review-comparison dt { font-weight: 600; }
+.review-comparison dd { margin: 0; }
+.review-comparison ins { text-decoration: none; font-weight: 650; }
 .not-found-actions { margin-top: 16px; }
 
 /* Адаптив */

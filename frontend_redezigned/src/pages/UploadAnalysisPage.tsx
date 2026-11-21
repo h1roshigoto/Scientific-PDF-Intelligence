@@ -1,59 +1,45 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { StatusBadge } from '../components/Badge';
 import { Feedback, LoadBoundary } from '../components/Feedback';
-import { InfoList } from '../components/InfoList';
-import { PdfPane } from '../components/PdfPane';
 import { PageHeading } from '../components/Shell';
 import { PrivateUploadAccess } from '../components/UploadPanel';
 import type { UploadCredentials } from '../components/UploadPanel';
 import { UploadStatus } from '../components/UploadProcessing';
+import { ReviewBadge, ReviewWarnings, UploadReview } from '../components/UploadReview';
 import type { StoredUpload, UploadClient } from '../data';
-import { contextLabel, contextText, formatValue, sourceLabel } from '../domain';
+import { formatValue, sourceLabel } from '../domain';
 import { useData } from '../hooks/useData';
 import { Link, uploadAnalysisUrl } from '../navigation';
 import { uploadClient } from '../provider';
-import { metricTitle, ResultEvidence } from './ResultDetailPage';
+import { isApproved } from '../upload-review';
+import { metricTitle } from './ResultDetailPage';
 
-function UploadAnalysis({ api, upload, token, resultId }: {
-  api: UploadClient; upload: StoredUpload; token: string; resultId: string | null;
-}) {
-  const load = useCallback(async (signal: AbortSignal) => {
-    const state = await api.processing(upload.upload_id, token, signal);
-    if (!state.counts) return { state, results: [], issues: [] };
-    const [results, issues] = await Promise.all([api.results(upload, token, signal), api.issues(upload, token, signal)]);
-    return { state, results, issues };
-  }, [api, upload, token]);
-  const pdf = useCallback((signal: AbortSignal) => api.pdf(upload.upload_id, token, signal), [api, upload.upload_id, token]);
+type UploadViewProps = { api: UploadClient; upload: StoredUpload; token: string };
+
+function UploadResultReview({ api, upload, token, resultId }: UploadViewProps & { resultId: string }) {
+  const load = useCallback((signal: AbortSignal) => api.review(upload.upload_id, resultId, token, signal),
+    [api, upload.upload_id, resultId, token]);
   const data = useData(load);
-  const href = uploadAnalysisUrl(upload.upload_id);
+  return <LoadBoundary {...data}>{(detail) => (
+    <UploadReview key={detail.result_id} api={api} upload={upload} token={token} initial={detail} onRefresh={data.retry} />
+  )}</LoadBoundary>;
+}
+
+function UploadAnalysis({ api, upload, token }: UploadViewProps) {
+  const load = useCallback((signal: AbortSignal) => api.reviews(upload.upload_id, token, signal), [api, upload.upload_id, token]);
+  const data = useData(load);
+  const [filter, setFilter] = useState('all');
   return (
     <LoadBoundary {...data}>
-      {({ state, results, issues }) => {
-        if (resultId) {
-          const result = results.find((row) => row.result_id === resultId);
-          if (!result) return <Feedback kind="empty" title="Научная запись недоступна">
-            <Link href={href}>К результатам загрузки</Link>
-          </Feedback>;
-          return (
-            <div className="split detail-layout">
-              <PdfPane key={result.result_id} domain={upload.domain} documentId={result.document_id}
-                initialPage={result.source.page} label={upload.original_filename} loadPdf={pdf} />
-              <div className="stack">
-                <ResultEvidence result={result}><Link href={href}>К результатам загрузки</Link></ResultEvidence>
-                <section className="surface">
-                  <header className="section-bar"><h2>Контекст записи</h2></header>
-                  <InfoList items={[
-                    ['Происхождение', result.source.origin === 'primary' ? 'Первичный результат'
-                      : result.source.origin === 'cited'
-                        ? ['Цитируемый результат', result.source.cited_publication_id].filter(Boolean).join(' · ')
-                        : 'Требует уточнения'],
-                    ...Object.entries(result.context).map(([key, value]): [string, string] => [contextLabel(key), contextText(value)]),
-                  ]} />
-                </section>
-              </div>
-            </div>
-          );
-        }
+      {({ processing: state, reviews, issues, pdf_status: pdf }) => {
+        const approved = reviews.filter((review) => isApproved(review.status)).length;
+        const rejected = reviews.filter((review) => review.status === 'rejected').length;
+        const visible = reviews.filter((review) => {
+          if (filter === 'rejected') return review.status === 'rejected';
+          if (filter === 'approved') return isApproved(review.status);
+          if (filter === 'pending') return !isApproved(review.status) && review.status !== 'rejected';
+          return true;
+        });
         return (
           <section className="surface" aria-label="Результаты анализа">
             <header className="section-bar"><h2>{upload.original_filename}</h2></header>
@@ -62,33 +48,32 @@ function UploadAnalysis({ api, upload, token, resultId }: {
               {state.mode === 'local' && <p className="muted">Локальный анализ извлекает значения из доступных таблиц.</p>}
               {state.human_review_required && <p>Научные записи и охват публикации требуют проверки человеком.</p>}
               {!state.counts && <button className="button" type="button" onClick={data.retry}>Обновить состояние</button>}
-              {state.status === 'completed' && state.counts?.results === 0 && (
-                <p>Анализ завершён, но подтверждённых научных результатов не обнаружено</p>
-              )}
-              {results.length > 0 && <ul className="upload-list" aria-label="Научные записи">
-                {results.map((result) => <li key={result.result_id}>
+              {pdf !== 'valid' && <p role="alert">Оригинал PDF отсутствует или его SHA-256 изменился.</p>}
+              {state.status === 'completed' && state.counts?.results === 0 && <p>Научные записи не извлечены.</p>}
+              {reviews.length > 0 && <div className="upload-form review-filters">
+                <label>Статус проверки<select value={filter} onChange={(event) => setFilter(event.target.value)}>
+                  <option value="all">Все</option><option value="pending">Ожидают проверки</option>
+                  <option value="approved">Подтверждены</option><option value="rejected">Отклонены</option>
+                </select></label>
+                <p>Проверено — {approved + rejected} · Ожидают проверки — {reviews.length - approved - rejected}
+                  {' · '}Подтверждено — {approved} · Отклонено — {rejected}</p>
+              </div>}
+              {reviews.length > 0 && !visible.length && <p>Записей с этим статусом нет.</p>}
+              {visible.length > 0 && <ul className="upload-list" aria-label="Научные записи">
+                {visible.map(({ result_id: id, original_result: result, status, decision }) => <li key={id}>
                   <div className="upload-record">
-                    <strong>{metricTitle(result)}</strong>
-                    <p>{formatValue(result.raw, true)} · {sourceLabel(result.source)}</p>
+                    <strong>{result ? metricTitle(result) : 'Запись из предыдущего анализа'}</strong>
+                    {result && <p>{formatValue(result.raw, true)} · {sourceLabel(result.source)}</p>}
+                    {status === 'approved_corrected' && decision?.reviewed_result && <p>
+                      Подтверждено · {formatValue(decision.reviewed_result.raw, true)}
+                    </p>}
                   </div>
-                  <StatusBadge status={result.extraction_status} />
-                  <Link className="button" href={uploadAnalysisUrl(upload.upload_id, result.result_id)}>Открыть источник</Link>
+                  {result && <StatusBadge status={result.extraction_status} />}
+                  <ReviewBadge status={status} />
+                  <Link className="button" href={uploadAnalysisUrl(upload.upload_id, id)}>{result ? 'Открыть источник' : 'Открыть историю'}</Link>
                 </li>)}
               </ul>}
-              {issues.length > 0 && <>
-                <h3>Замечания</h3>
-                <ul className="upload-issues">
-                  {issues.map((issue) => <li key={issue.issue_id}>
-                    <p>{issue.reason}</p>
-                    {issue.evidence_refs.map((reference, index) => (
-                      <p className="muted" key={index}>
-                        {typeof reference.page === 'number' && `Стр. ${reference.page}`}
-                        {typeof reference.fragment === 'string' && ` · ${reference.fragment}`}
-                      </p>
-                    ))}
-                  </li>)}
-                </ul>
-              </>}
+              <ReviewWarnings issues={issues} />
             </div>
           </section>
         );
@@ -110,8 +95,9 @@ export function UploadAnalysisPage({ uploadId, resultId, ...credentials }: Uploa
         <PrivateUploadAccess api={api} {...credentials}>
           {(records) => {
             const upload = records.find((row) => row.upload_id === uploadId);
-            return upload ? <UploadAnalysis api={api} upload={upload} token={credentials.token} resultId={resultId} />
-              : <Feedback kind="empty" title="Загрузка не найдена" />;
+            if (!upload) return <Feedback kind="empty" title="Загрузка не найдена" />;
+            const props = { api, upload, token: credentials.token };
+            return resultId ? <UploadResultReview {...props} resultId={resultId} /> : <UploadAnalysis {...props} />;
           }}
         </PrivateUploadAccess>
       ) : <Feedback kind="empty" title="Приватные загрузки недоступны" />}

@@ -135,12 +135,14 @@ test('signs in, validates, retries, persists and opens an uploaded Solar PDF', a
   await expect(row).toBeVisible();
 });
 
-test('runs explicit local analysis and reopens persisted PDF evidence after signing in again', async ({ page, request }) => {
+test('reviews real local extraction, keeps history after sign-in, and recovers from a revision conflict', async ({ page, request }) => {
+  test.setTimeout(45_000);
   const fixture = await request.get('/api/__test/processing-fixture.pdf');
   expect(fixture.ok()).toBe(true);
   const pdf = await fixture.body();
   const filename = `Measurements-${randomUUID()}.pdf`;
-  const official = await (await request.get('/api/results')).json();
+  const officialEndpoints = ['/api/results', '/api/issues', '/api/documents'];
+  const official = await Promise.all(officialEndpoints.map(async (url) => (await request.get(url)).json()));
   await page.goto('/documents');
   await signIn(page);
   const scope = panel(page);
@@ -167,6 +169,7 @@ test('runs explicit local analysis and reopens persisted PDF evidence after sign
   await expect(row).toContainText('В очереди');
   await expect(row).toContainText('Анализ завершён');
   await expect(row).toContainText('Результатов — 4');
+  const auto = await (await request.get(`${base}/results`, { headers })).json();
   await row.getByRole('link', { name: 'Посмотреть результаты' }).click();
   const results = page.getByRole('list', { name: 'Научные записи' });
   await expect(results.getByRole('listitem')).toHaveCount(4);
@@ -181,8 +184,62 @@ test('runs explicit local analysis and reopens persisted PDF evidence after sign
   await expect(page.locator('canvas')).toHaveAttribute('data-rendered-page', '2');
   await expect(page.getByTestId('pdf-page-text')).toContainText('Table 1');
   expect((await request.get(`${base}/results`)).status()).toBe(401);
-  expect(await (await request.get('/api/results')).json()).toEqual(official);
+  const review = page.getByRole('region', { name: 'Ручная проверка' });
+  const history = page.getByRole('region', { name: 'История решений' });
+  const check = review.getByLabel('Я сверил значение, единицу и контекст на странице PDF');
+  const approve = review.getByRole('button', { name: 'Подтвердить исходное' });
+  const back = () => page.getByRole('link', { name: 'К результатам загрузки' }).first().click();
+  const open = (value: string) => results.getByRole('listitem').filter({ hasText: value }).first()
+    .getByRole('link', { name: 'Открыть источник' }).click();
 
+  await expect(approve).toBeDisabled();
+  await review.getByLabel('Метка оператора (необязательно)').fill('Оператор теста');
+  await check.check();
+  await approve.click();
+  await expect(review.getByText('Подтверждено', { exact: true })).toBeVisible();
+  await history.getByText('Подтверждено', { exact: true }).click();
+  await expect(history.getByText('Оператор теста', { exact: true })).toBeVisible();
+  await back();
+
+  await open('15.6 %');
+  await review.getByRole('button', { name: 'Предложить исправление' }).click();
+  await review.getByLabel('Исходное значение', { exact: true }).fill('15.7');
+  await review.getByLabel('Нормализованное значение', { exact: true }).fill('15.7');
+  await review.getByLabel('Основание нормализации').fill('В исправлении на странице 1 значение PCE дано в процентах.');
+  await review.getByLabel('Страница PDF', { exact: true }).fill('1');
+  await review.getByLabel('Фрагмент', { exact: true }).fill('B1 PCE was corrected from 15.6% to 15.7%.');
+  await review.getByLabel('Таблица', { exact: true }).clear();
+  await review.getByText('Научный контекст', { exact: true }).click();
+  await expect(review.getByLabel('Прибор', { exact: true })).toHaveValue('B1');
+  await review.getByLabel('Обоснование исправления').fill('На странице 1 опубликовано исправление значения PCE образца B1.');
+  await expect(review.getByText('Было → Стало', { exact: true })).toBeVisible();
+  await review.getByRole('button', { name: 'Сохранить предложение' }).click();
+  await expect(review.getByText('Предложено исправление', { exact: true })).toBeVisible();
+  expect(await (await request.get(`${base}/reviewed-results`, { headers })).json()).toHaveLength(1);
+  const approveCorrection = review.getByRole('button', { name: 'Подтвердить исправление' });
+  await expect(approveCorrection).toBeDisabled();
+  await review.getByRole('button', { name: 'Открыть страницу исправления · 1' }).click();
+  await expect(page.locator('canvas')).toHaveAttribute('data-rendered-page', '1');
+  await expect(page.getByTestId('pdf-page-text')).toContainText('Erratum');
+  await check.check();
+  await approveCorrection.click();
+  await expect(review.getByText('Исправление подтверждено', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('raw-value')).toHaveText('15.6 %');
+  await expect(history.getByText('Предложено исправление', { exact: true })).toBeVisible();
+  await expect(history.getByText('Исправление подтверждено', { exact: true })).toBeVisible();
+  await back();
+
+  await open('1200 mV');
+  await review.getByLabel('Примечание или причина').fill('Сопоставление с измерительным протоколом требует повторной сверки.');
+  await review.getByRole('button', { name: 'Отклонить', exact: true }).click();
+  await expect(review.getByText('Отклонено', { exact: true })).toBeVisible();
+  await history.getByText('Отклонено', { exact: true }).click();
+  await expect(history.getByText('Сопоставление с измерительным протоколом требует повторной сверки.')).toBeVisible();
+  const rejectedId = new URL(page.url()).searchParams.get('evidence');
+  await back();
+  await open('15.5 %');
+
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.reload();
   await expect(page.getByLabel('Токен доступа')).toHaveValue('');
   await expect(page.getByTestId('raw-value')).toHaveCount(0);
@@ -190,7 +247,53 @@ test('runs explicit local analysis and reopens persisted PDF evidence after sign
   await page.getByRole('button', { name: 'Войти' }).click();
   await expect(page.getByTestId('raw-value')).toHaveText('15.5 %');
   await expect(page.locator('canvas')).toHaveAttribute('data-rendered-page', '2');
-  await page.getByRole('link', { name: 'К результатам загрузки' }).first().click();
+  await expect(review.getByText('Подтверждено', { exact: true })).toBeVisible();
+  expect(await page.locator('html').evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+  await back();
   await expect(page.getByText('Анализ завершён', { exact: true })).toBeVisible();
   await expect(results.getByRole('listitem')).toHaveCount(4);
+  const filter = page.getByLabel('Статус проверки');
+  await filter.selectOption('approved');
+  await expect(results.getByRole('listitem')).toHaveCount(2);
+  await filter.selectOption('rejected');
+  await expect(results.getByRole('listitem')).toHaveCount(1);
+  await filter.selectOption('pending');
+  await expect(results.getByRole('listitem')).toHaveCount(1);
+  await open('1200 mV');
+
+  const fourthId = new URL(page.url()).searchParams.get('evidence');
+  expect(fourthId).toBeTruthy();
+  expect(fourthId).not.toBe(rejectedId);
+  const reviewPath = `${base}/results/${encodeURIComponent(fourthId!)}/review`;
+  const pending = await (await request.get(reviewPath, { headers })).json();
+  expect(pending.revision).toBe(0);
+  expect((await request.post(reviewPath, { headers, data: {
+    basis: pending.basis, expected_revision: 0, action: 'reject', reason: 'Параллельное решение оператора',
+  } })).status()).toBe(201);
+  const conflict = page.waitForResponse((reply) => reply.request().method() === 'POST' && reply.status() === 409);
+  await check.check();
+  await approve.click();
+  expect((await (await conflict).json()).detail).toBe('review_revision_conflict');
+  await expect(review.getByRole('alert')).toContainText('Рецензию уже изменили');
+  await review.getByRole('button', { name: 'Обновить данные' }).click();
+  await expect(review.getByText('Отклонено', { exact: true })).toBeVisible();
+  await expect(review.getByText('Ревизия 1')).toBeVisible();
+  await expect(approve).toBeDisabled();
+  await check.check();
+  await approve.click();
+  await expect(review.getByText('Ревизия 2')).toBeVisible();
+  await expect(history.getByText('Отклонено', { exact: true })).toBeVisible();
+  await expect(history.getByText('Подтверждено', { exact: true })).toBeVisible();
+
+  const reviewed = await (await request.get(`${base}/reviewed-results`, { headers })).json();
+  expect(reviewed).toHaveLength(3);
+  expect(reviewed.some((entry: { original_result: { result_id: string } }) => entry.original_result.result_id === rejectedId)).toBe(false);
+  expect(reviewed).toContainEqual(expect.objectContaining({
+    original_result: expect.objectContaining({ raw: { value: '15.6', unit: '%' } }),
+    reviewed_result: expect.objectContaining({ raw: { value: '15.7', unit: '%' }, source: expect.objectContaining({ page: 1 }) }),
+    decision: expect.objectContaining({ status: 'approved_corrected' }),
+  }));
+  expect(await (await request.get(`${base}/results`, { headers })).json()).toEqual(auto);
+  expect(await (await request.get(`${base}/file`, { headers })).body()).toEqual(pdf);
+  expect(await Promise.all(officialEndpoints.map(async (url) => (await request.get(url)).json()))).toEqual(official);
 });

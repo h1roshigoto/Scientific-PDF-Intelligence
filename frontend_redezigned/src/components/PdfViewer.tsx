@@ -14,7 +14,9 @@ GlobalWorkerOptions.workerSrc = workerUrl;
 
 type Pdf = { doc: PDFDocumentProxy; url: string };
 
-function PdfPage({ pdf, page, label }: { pdf: Pdf; page: number; label: string }) {
+function PdfPage({ pdf, page, label, onPageRendered }: {
+  pdf: Pdf; page: number; label: string; onPageRendered?: (page: number) => void;
+}) {
   const stage = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const [width, setWidth] = useState(0);
@@ -58,6 +60,7 @@ function PdfPage({ pdf, page, label }: { pdf: Pdf; page: number; label: string }
           page,
           text: content.items.flatMap((item) => ('str' in item ? [item.str] : [])).join(' '),
         });
+        onPageRendered?.(page);
       }
     }
 
@@ -75,7 +78,7 @@ function PdfPage({ pdf, page, label }: { pdf: Pdf; page: number; label: string }
       active = false;
       rendering?.cancel();
     };
-  }, [pdf, page, width, attempt]);
+  }, [pdf, page, width, attempt, onPageRendered]);
 
   const ready = rendered?.page === page && failure?.page !== page;
 
@@ -123,6 +126,7 @@ export default function PdfViewer({
   highlightsResult = true,
   actions,
   loadPdf,
+  onPageRendered,
 }: {
   domain: Domain;
   documentId: string;
@@ -131,6 +135,7 @@ export default function PdfViewer({
   highlightsResult?: boolean;
   actions?: ReactNode;
   loadPdf?: (signal: AbortSignal) => Promise<Blob>;
+  onPageRendered?: (page: number) => void;
 }) {
   const [page, setPage] = useState(initialPage);
   const [attempt, retry] = useState(0);
@@ -233,7 +238,7 @@ export default function PdfViewer({
           </a>
         </div>
       </div>
-      <PdfPage pdf={pdf} page={page} label={label} />
+      <PdfPage pdf={pdf} page={page} label={label} onPageRendered={onPageRendered} />
     </section>
   );
 }

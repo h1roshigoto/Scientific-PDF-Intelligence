@@ -104,10 +104,105 @@ diagnostics. Available results and issues come from the latest finished
 attempt, including partial checkpoints with a summary. While an attempt is
 queued or running these endpoints return empty arrays. `completed` marks
 technical completion. Private records retain `extracted` or `needs_review`
-until human verification. The public registry, results, exports and project
-passport continue to read the official scientific Store.
+for their entire lifetime. Human verification has its own contract below.
+The public registry, results, exports and project passport continue to read
+the official scientific Store.
 The Windows setup and the requirements for public deployment are in the
 [demo runbook](DEMO_RUNBOOK.md#приватная-загрузка-pdf).
+
+### Private scientific review
+
+Use the same bearer token on each route. Responses, including errors, use
+`Cache-Control: no-store`. The shared token authorizes an operator to access the
+private store. `reviewer_label` is optional, self-entered audit metadata.
+
+| Route | Success response |
+| --- | --- |
+| `GET /uploads/{upload_id}/reviews` | Processing state, PDF integrity status, review states and scientific issues |
+| `GET /uploads/{upload_id}/results/{result_id}/review` | Original record, current decision, applicability, revision, issues and OCR pages |
+| `POST /uploads/{upload_id}/results/{result_id}/review` | `201 Created` with the updated review detail |
+| `GET /uploads/{upload_id}/results/{result_id}/review/history` | Events in ascending revision order |
+| `GET /uploads/{upload_id}/reviewed-results` | Applicable approved records with `original_result`, `reviewed_result`, `decision`, `issues` and `ocr_pages` |
+
+URL-encode `result_id` as a path segment. A new review state is `pending`
+with revision `0`. Copy the `basis` and `revision` from the detail response
+into each write. `expected_revision` is the last observed revision.
+
+```json
+{
+  "basis": {
+    "upload_id": "<32-character upload ID>",
+    "domain": "solar",
+    "result_id": "<result ID>",
+    "source_job_id": "<32-character job ID>",
+    "pdf_sha256": "<64-character SHA-256>",
+    "source_result_hash": "<64-character SHA-256>"
+  },
+  "expected_revision": 0,
+  "action": "approve",
+  "evidence_mode": "text",
+  "warnings_acknowledged": true,
+  "reviewer_label": "Local operator"
+}
+```
+
+| Action | Decision | Requirements |
+| --- | --- | --- |
+| `approve` | `approved` | Confirm the original PDF evidence. The reason is optional for text review. |
+| `propose_correction` | `correction_proposed` | Supply `correction` and a nonblank `reason` grounded in the PDF. |
+| `approve_correction` | `approved_corrected` | Explicitly confirm the current applicable proposal using its revision. The server uses the saved proposal. |
+| `reject` | `rejected` | Supply a nonblank `reason`. The automatic record and history are retained. |
+
+Approvals require `evidence_mode` (`text` or `visual`). Visual review requires
+a reason. OCR-required pages and pages without extractable text require visual
+review. Approval with applicable scientific issues requires
+`warnings_acknowledged: true`. The issues remain open and appear alongside the
+reviewed records. Review actions certify the operator's comparison with the
+original PDF. The server validates integrity, page bounds, and the scientific
+structure.
+
+A correction can replace `raw`, `normalized`, and `source`, or update
+`metric.name`, `metric.k` and individual `context` keys. Omitted groups and
+context keys inherit from the automatic record. `raw` and `normalized` each
+accept `value` and `unit`. Keep unknown
+units as `null` and use `null` for both normalized fields if a conversion
+cannot be established. Changed normalization needs `correction.normalization_evidence`
+and a documented unit or RAG evaluation protocol. Known unit conversions must
+match the scientific normalization rules. Context retains the instrument,
+conditions and other applicable fields unless explicitly edited. Retrieval `top_k`
+belongs in context, and `metric.k` is independent. RAG approvals require explicit
+primary or cited provenance. Cited evidence needs `cited_publication_id`.
+For any source change, send its 1-based PDF `page` with the evidence fields
+and explain the change in `reason`. Document, upload and extraction provenance
+are immutable. `extraction_metadata` in a corrected record still describes
+the source extraction.
+
+The source hash is SHA-256 over the automatic result's JSON with recursively
+sorted object keys, compact separators and UTF-8 encoding. It includes raw and
+normalized data, metric and `k`, context, evidence and extraction metadata.
+The server matches the basis against the current version and hashes the original
+PDF before accepting a write. A new job ID invalidates prior decisions even
+when the result hash is identical. A changed record or PDF also makes its
+decision `stale`. An old decision remains accessible with its original revision
+and snapshot. If a record disappeared, detail still serves its history and
+returns `original_result: null`. `pdf_status` is `valid`, `missing` or `mismatch`.
+
+Each accepted action adds one revision to a per-result SQLite event log at
+`SPI_UPLOAD_PROCESS_STATE_DIR/<upload_id>/reviews.sqlite3`. The latest committed
+event is the current decision. Each event keeps the previous and new decisions,
+the source snapshot, proposed fields, warnings and OCR context. Queue and review
+transactions serialize each write against enqueue, claim and worker status updates.
+An append rolls back on write failure. History survives restarts with the same
+private directories. The log is append-only at the application layer.
+
+`409` covers a revision conflict, changed basis or PDF, active analysis, or
+an unavailable proposal. Refresh detail and make a new decision after checking
+the source. A repeated POST with an already used revision returns `409`.
+`422` covers invalid input or scientific evidence. `401`, `404` and `503` use
+the private upload authentication, lookup and configuration rules. The reviewed
+projection omits pending, proposed, rejected and stale decisions. Review does
+not change extraction status, publication scope or release readiness. CSV export
+of reviewed records belongs to P0 №29.
 
 ## Project passport
 
