@@ -123,16 +123,22 @@ class Store:
                      or hashes.get(r.document_id) == r.extraction_metadata.pdf_sha256)]
 
     def issues(self, domain=None, *, include_excluded=True):
+        return [issue for _, issue in self.issue_entries(domain, include_excluded=include_excluded)]
+
+    def issue_entries(self, domain=None, *, include_excluded=True):
+        """Yield issues with their checkpoint owner, when stored in a document checkpoint."""
         hashes = {d["document_id"]: d.get("sha256") for d in self.documents()}
         excluded = set() if include_excluded else self._excluded_documents(hashes)
-        rows = []
         for issue in self.read("issues.json"):
             owners = {ref["document_id"] for ref in issue.get("evidence_refs", ()) if ref.get("document_id")}
             if not owners or not owners <= excluded:
-                rows.append(issue)
+                row = ValidationIssue.model_validate(issue)
+                if domain is None or row.domain == domain:
+                    yield None, row
         for track in (domain,) if domain else ("solar", "rag"):
             for doc in self.batch_documents(track):
                 if doc["document_id"] not in excluded and doc.get("sha256") == hashes.get(doc["document_id"]):
-                    rows.extend(doc.get("science_issues", ()))
-        return [r for r in map(ValidationIssue.model_validate, rows)
-                if domain is None or r.domain == domain]
+                    for issue in doc.get("science_issues", ()):
+                        row = ValidationIssue.model_validate(issue)
+                        if domain is None or row.domain == domain:
+                            yield doc["document_id"], row
