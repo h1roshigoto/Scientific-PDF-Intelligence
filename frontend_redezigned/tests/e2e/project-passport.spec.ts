@@ -31,7 +31,7 @@ test('downloads the complete project by default and retains the CSV and scheme e
   await page.goto('/export?domain=rag');
   const panel = region(page);
   await expect(panel.getByLabel('Область экспорта')).toHaveValue('all');
-  await expect(panel.getByText(/Публикаций: 5 · Результатов: 8/)).toBeVisible();
+  await expect(panel.getByText(/Публикаций: 5 · Результатов в списке: 8/)).toBeVisible();
   await expect(panel.getByText(/Страниц в очереди OCR: 1/)).toBeVisible();
   const pages = await readReport(page, 'all');
   expect(pages.length).toBeGreaterThan(1);
@@ -48,7 +48,7 @@ test('downloads the complete project by default and retains the CSV and scheme e
   await expect(panel.getByRole('status')).toContainText('PDF готов');
   await expect(panel.locator('time')).toHaveAttribute('datetime', '2026-11-20T17:40:00Z');
   await expect(page.getByRole('button', { name: 'Скачать паспорт данных' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Скачать results.csv' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Скачать solar-results.csv' })).toBeVisible();
   await panel.getByLabel('Область экспорта').selectOption('publication');
   await panel.getByRole('combobox', { name: 'Публикация', exact: true }).selectOption('rag:D001');
   await expect(downloadButton(panel)).toBeEnabled();
@@ -75,7 +75,7 @@ test('exports a single publication by its exact identifier, including excluded a
   expect(article).not.toContain('rag:D002');
 
   await publication.selectOption('solar:D006');
-  await expect(panel.getByText(/Публикаций: 1 · Результатов: 0/)).toBeVisible();
+  await expect(panel.getByText(/Публикаций: 1 · Результатов в списке: 0/)).toBeVisible();
   const excluded = (await readReport(page, 'solar_D006')).join(' ');
   expect(excluded).toContain('Вне области кейса');
   expect(excluded).toContain('Device architecture: two-junction tandem');

@@ -63,7 +63,10 @@ def issues(domain: str | None = Query(None, pattern="^(solar|rag)$")):
 def document_file(document_id: str):
     for item in store().documents():
         if item["document_id"] == document_id:
-            path = Path(item["file_path"])
+            file_path = item.get("file_path")
+            if not file_path:
+                raise HTTPException(404, "Original PDF unavailable")
+            path = Path(file_path)
             if not path.is_file() or path.suffix.lower() != ".pdf":
                 raise HTTPException(404, "Original PDF unavailable")
             return FileResponse(path, media_type="application/pdf", filename=item["filename"],
