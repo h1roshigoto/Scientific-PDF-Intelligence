@@ -30,6 +30,7 @@ INTEGER = re.compile(r"[0-9]+")
 class Submission:
     domain: Domain
     tables: Mapping[str, Iterable[Mapping[str, Cell]]]
+    quality_gate: Mapping[str, object] | None = None
 
 
 def read_submission(schema: SubmissionSchema, directory: Path) -> Submission:
