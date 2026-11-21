@@ -254,7 +254,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None)
 
         def inspect_page(page, blocks):
             units, unresolved = page_fragments(page, blocks, lambda text: relevant(text, domain),
-                                               previous_captions=previous_captions)
+                                               previous_captions=previous_captions, row_metrics=domain == "rag")
             fragments.extend(units)
             layout_issues.extend(unresolved)
 

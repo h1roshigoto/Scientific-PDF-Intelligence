@@ -11,13 +11,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .batch_pdf import CAPTION, CELL, RECORD, RETRIEVER_AXES, UNIT_ONLY, Fragment
+from .batch_pdf import CAPTION, CELL, METRIC_AXIS, RECORD, RETRIEVER_AXES, UNIT_ONLY, Fragment
 from .csv_schema import load_schema
 from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSIONS = {"solar": "batch-evidence-7", "rag": "batch-evidence-10"}
+SCHEMA_VERSIONS = {"solar": "batch-evidence-7", "rag": "batch-evidence-11"}
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
@@ -277,8 +277,15 @@ def normalize(raw_value, raw_unit, metric, domain):
     return Value(value=str(value * Decimal(factor)), unit=normalized_unit)
 
 
-def _table_unit(cell):
-    header = UNIT_TAIL.search(cell.headers[-1].text) if cell.headers else None
+def _row_metric_source(cell, domain):
+    if domain == "rag" and cell.row_axis and fold(cell.row_axis.text) == METRIC_AXIS:
+        return cell.row[-1]
+    return None
+
+
+def _table_unit(cell, domain):
+    heading = _row_metric_source(cell, domain) or (cell.headers[-1] if cell.headers else None)
+    header = UNIT_TAIL.search(heading.text) if heading else None
     if cell.aggregation == "champion" and (record := RECORD.fullmatch(cell.value.text)):
         return record[1], header[1] if header else "", None
     number = CELL.fullmatch(cell.value.text)
@@ -291,6 +298,12 @@ def _table_unit(cell):
 
 
 def _table_metric(cell, domain):
+    if source := _row_metric_source(cell, domain):
+        # A named column metric or change statistic can alter the meaning of the row label.
+        if any(metric_label(b.text, domain) or re.search(r"[Δ∆δ]|\b(?:delta|change|improvement)\b", b.text, re.I)
+               for b in cell.headers):
+            return None
+        return metric_label(source.text, domain)
     for b in reversed(cell.headers):
         if not UNIT_ONLY.fullmatch(b.text):
             return metric_label(b.text, domain)
@@ -421,6 +434,9 @@ def _table_context(cell, fragment, domain):
                           r"(?=\s*(?:(?i:using|with|dataset|benchmark)\b|[.,;]|$))", caption_text)
     if len(set(datasets)) == 1:
         result.setdefault("dataset_name", datasets[0])
+    if _row_metric_source(cell, domain):
+        # The column path locates the value. Its model or method role needs separate evidence.
+        return result
     axis = fold(cell.row_axis.text) if cell.row_axis else ""
     label = _table_metric(cell, domain)
     component = None
@@ -500,12 +516,16 @@ def offline_proposals(fragment, domain):
 def _table_proposal(cell, fragment, domain):
     label = _table_metric(cell, domain)
     if label is None:
-        leaf = next((b.text for b in reversed(cell.headers) if not UNIT_ONLY.fullmatch(b.text)), "")
+        row_metric = _row_metric_source(cell, domain)
+        leaf = row_metric.text if row_metric else next(
+            (b.text for b in reversed(cell.headers) if not UNIT_ONLY.fullmatch(b.text)), "",
+        )
         terms = re.split(r"\s*[/,]\s*|\s+and\s+", UNIT_TAIL.sub("", leaf), flags=re.I)
-        ambiguous = not leaf or sum(metric_label(term, domain) is not None for term in terms) > 1
+        ambiguous = (not leaf or bool(row_metric and metric_label(leaf, domain))
+                     or sum(metric_label(term, domain) is not None for term in terms) > 1)
         code = "ambiguous_header" if ambiguous else "unknown_metric"
         raise EvidenceError(code)
-    raw_value, raw_unit, _ = _table_unit(cell)
+    raw_value, raw_unit, _ = _table_unit(cell, domain)
     metric, k = label
     return Proposal(
         cell=cell.value.block_id, row=[b.block_id for b in cell.row],
@@ -524,7 +544,8 @@ def unresolved_table_cells(fragment, domain, digest):
                    else "value_or_unit", "pdf_sha256": digest, "page": fragment.page, "table": fragment.location,
                    "extraction_status": "needs_review",
                    "source_block_id": cell.value.block_id, "value": _block_ref(cell.value),
-                   "row": [_block_ref(b) for b in cell.row], "headers": [_block_ref(b) for b in cell.headers]}
+                   "row": [_block_ref(b) for b in cell.row], "headers": [_block_ref(b) for b in cell.headers],
+                   **({"row_axis": _block_ref(cell.row_axis)} if _row_metric_source(cell, domain) else {})}
 
 
 def make_prompt(fragment, domain):
@@ -539,8 +560,10 @@ def make_prompt(fragment, domain):
     )
     if fragment.cells:
         candidates = offline_proposals(fragment, domain)
+        unit_heading = ("metric row label" if all(_row_metric_source(cell, domain) for cell in fragment.cells)
+                        else "header")
         instructions += (
-            "Use only the listed target cell and its geometry. Copy raw_unit from the cell or header exactly, "
+            f"Use only the listed target cell and its geometry. Copy raw_unit from the cell or {unit_heading} exactly, "
             "or use an empty string if neither prints a unit. Omit facts or use an empty object for a table cell. "
             "The row and column supply the measurement context. "
         )
@@ -610,7 +633,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             raise EvidenceError("wrong_table_cell")
         if _table_metric(cell, domain) != label:
             raise EvidenceError("wrong_table_metric")
-        raw, unit, spread = _table_unit(cell)
+        raw, unit, spread = _table_unit(cell, domain)
         if (raw, unit) != (proposal.raw_value, proposal.raw_unit):
             raise TableValueMismatch(proposal, raw, unit)
         context.update(_table_context(cell, fragment, domain))
@@ -620,7 +643,8 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         if fragment.caption:
             geometry.extend(fragment.caption_support or (fragment.caption,))
         geometry.extend(fragment.table_references)
-        context_evidence["metric"] = [_block_ref(b) for b in cell.headers]
+        metric_source = (row_metric, cell.row_axis) if (row_metric := _row_metric_source(cell, domain)) else cell.headers
+        context_evidence["metric"] = [_block_ref(b) for b in metric_source]
         if domain == "solar" and name == "PCE" and any(
             fold(UNIT_TAIL.sub("", b.text)) == "efficiency" for b in cell.headers
         ) and not (
@@ -692,7 +716,9 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             "reranking": {"dataset_name", "retrieval_method"},
         }.get(context.get("experiment_type"), {"rag_variant", "generator_model", "dataset_name"})
         missing = required - context.keys()
-        if name in _UNITLESS_RAG_SCORES and "generator_model" in context and "experiment_type" not in context:
+        if row_metric:
+            missing.add("column_role")
+        elif name in _UNITLESS_RAG_SCORES and "generator_model" in context and "experiment_type" not in context:
             # A caption can name fixed models without grounding the varying model for this cell.
             caption = _support_caption(fragment)
             varying_roles = {match.lastgroup or "experiment_type"
