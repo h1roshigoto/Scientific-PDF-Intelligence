@@ -1,6 +1,9 @@
 """Access the existing scientific Store inside one private upload namespace."""
 
+from hashlib import sha256
 from pathlib import Path
+
+from .batch import extraction_revision
 
 from .models import StoredUpload, ValidationIssue
 from .storage import Store
@@ -41,6 +44,19 @@ class UploadProcessingStore(Store):
         records = self.batch_documents(self.upload.domain)
         return records[0] if records and self._matches(records[0]) else None
 
+    def needs_reanalysis(self, mode):
+        record = self.checkpoint()
+        return bool(record and mode and record.get("revision")
+                    and record["revision"] != extraction_revision(self.upload.sha256, self.upload.domain, mode))
+
+    def archive_checkpoint(self):
+        previous = self.checkpoint()
+        if previous and previous.get("revision"):
+            key = sha256(previous["revision"].encode()).hexdigest()
+            name = Path("batch-history") / f"{key}.json"
+            if not self._path(name).exists():
+                self.write(name, previous)
+
     def export_source_bytes(self):
         names = ("documents.json", "results.json", "issues.json",
                  Path("batch") / self.upload.domain / f"{self.upload.upload_id}.json")
@@ -65,6 +81,48 @@ class UploadProcessingStore(Store):
         ]
 
     def upload_issues(self, record):
+        if record.get("issue_format") != 2:
+            return self._legacy_upload_issues(record)
+        domain = self.upload.domain
+        issues = [issue for owner, issue in self.issue_entries(domain) if owner == self.document_id]
+        groups = {}
+
+        def add(rule, severity, page, table, reasons, ids=(), details=(), **evidence):
+            key = (rule, severity, page, table)
+            group = groups.setdefault(key, {"reasons": {}, "ids": {}, "evidence": [], "details": {}})
+            group["reasons"].update(dict.fromkeys(reasons))
+            group["ids"].update(dict.fromkeys(ids))
+            if evidence and evidence not in group["evidence"]:
+                group["evidence"].append(evidence)
+            for item in details:
+                group["details"].setdefault((item.get("source_block_id"), item.get("code")), item)
+
+        for problem in record.get("layout_issues", ()):
+            rule = problem["reason"]
+            add(rule, "info" if rule == "table_outside_metric_scope" else "warning",
+                problem["page"], problem.get("location"), (rule,),
+                fragment=problem.get("quote"), source_block_id=problem.get("source_block_id"))
+        for key, fragment in record.get("fragments", {}).items():
+            if fragment["status"] == "review":
+                add("fragment_needs_review", "warning", fragment["page"], fragment.get("location"),
+                    fragment["issues"], (row["result_id"] for row in fragment.get("results", ())),
+                    fragment.get("review_details", ()), source_block_id=key)
+        for page in record.get("pages", ()):
+            if page.get("error") or page.get("analysis_error"):
+                add("page_analysis_failed", "error", page["page"], None, ("page_analysis_failed",))
+
+        for (rule, severity, page, table), group in groups.items():
+            digest = sha256(f"{self.upload.sha256}|{rule}|{page}|{table}".encode()).hexdigest()[:20]
+            issues.append(ValidationIssue(
+                issue_id=f"{self.document_id}:{rule}:{digest}", domain=domain, rule_id=rule, severity=severity,
+                reason=" | ".join(sorted(group["reasons"])), result_ids=list(group["ids"]),
+                evidence_refs=[{"document_id": self.document_id, "pdf_sha256": self.upload.sha256,
+                                "page": page, "table": table, "sources": group["evidence"],
+                                "details": list(group["details"].values())}],
+            ))
+        return issues, sum(key[1] != "info" for key in groups)
+
+    def _legacy_upload_issues(self, record):
         domain = self.upload.domain
         issues = [issue for owner, issue in self.issue_entries(domain) if owner == self.document_id]
         unresolved = 0

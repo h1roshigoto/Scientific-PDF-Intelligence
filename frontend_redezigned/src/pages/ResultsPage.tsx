@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { StatusBadge } from '../components/Badge';
 import { Feedback, LoadBoundary } from '../components/Feedback';
+import { Icon } from '../components/Icon';
 import { Note } from '../components/Note';
 import { FilterSelect, SearchInput } from '../components/SearchInput';
 import { WorkspacePage } from '../components/Shell';
@@ -87,7 +88,7 @@ function ResultsTable({
                   </button>
                 </td>
                 <td data-label="Метрика">
-                  <strong className="metric-code">
+                  <strong className="metric-code" title={metricTitle(row)}>
                     {row.metric.name}
                     {row.metric.k === null ? '' : `@${row.metric.k}`}
                   </strong>
@@ -150,6 +151,7 @@ function QuickInspector({ result, filters }: { result: Result; filters: Filters 
         </p>
       </div>
       <div className="metric-readout">
+        <p className="metric-caption">Нормализованное значение</p>
         <div className="metric-display num" data-testid="summary-value">
           {formatValue(result.normalized)}
         </div>
@@ -178,8 +180,10 @@ function QuickInspector({ result, filters }: { result: Result; filters: Filters 
       <div className="button-row">
         <Link className="button primary" href={resultUrl(result.result_id, filters)}>
           Открыть детали
+          <Icon name="next" size={14} />
         </Link>
         <Link className="button" href={resultUrl(result.result_id, filters, true)}>
+          <Icon name="file" size={15} />
           Страница PDF
         </Link>
       </div>
@@ -215,8 +219,8 @@ export function ResultsPage({
     <WorkspacePage
       title="Результаты"
       subtitle="Научные показатели с контекстом измерения и привязкой к страницам PDF."
+      action={<Link className="button primary" href={sectionUrl('documents')}><Icon name="file" />Загрузить PDF</Link>}
     >
-      <Link className="button upload-panel" href={sectionUrl('documents')}>Загрузить PDF</Link>
       <LoadBoundary {...data}>
         {({ rows, documents }) => {
           const issues = reviews.state.kind === 'ready' ? reviews.state.data : [];
@@ -233,14 +237,23 @@ export function ResultsPage({
 
           function select(id: string) {
             navigate(sectionUrl('results', filters, id), { replace: true });
-            if (window.matchMedia('(max-width: 850px)').matches) {
+            if (window.matchMedia('(max-width: 1120px)').matches) {
               requestAnimationFrame(() => document.getElementById('result-inspector')?.focus());
             }
           }
 
           return (
             <>
-              <div className="toolbar" aria-label="Фильтры результатов">
+              {rows.length > 0 && (
+                <dl className="result-overview" aria-label="Сводка по найденным результатам" aria-live="polite">
+                  <div><dt>Результаты</dt><dd className="num">{visible.length}</dd></div>
+                  <div><dt>Публикации</dt><dd className="num">{new Set(visible.map((row) => row.document_id)).size}</dd></div>
+                  <div><dt>Требуют проверки</dt><dd className="num">{visible.filter((row) => row.extraction_status === 'needs_review').length}</dd></div>
+                </dl>
+              )}
+              {rows.length > 0 && (
+                <div className="surface result-filters">
+              <div className="toolbar" role="group" aria-label="Фильтры результатов">
                 <SearchInput value={filters.query} update={(value) => change('query', value)} />
                 <FilterSelect
                   label="Метрика"
@@ -266,21 +279,12 @@ export function ResultsPage({
                   choices={uniqueOptions(rows.map((row) => sourceLabel(row.source)))}
                   onChange={(value) => change('source', value)}
                 />
-                {filtering ? (
-                  <button type="button" className="button quiet toolbar-action" onClick={reset}>
-                    Сбросить
-                  </button>
-                ) : (
-                  <Link className="button quiet toolbar-action" href={sectionUrl('export')}>
-                    Экспорт
-                  </Link>
-                )}
               </div>
               <details
                 className="advanced-filters"
                 open={filters.condition || filters.warning ? true : undefined}
               >
-                <summary>Условия и замечания</summary>
+                <summary><Icon name="filter" size={15} />Условия и замечания<Icon name="next" size={12} /></summary>
                 <div className="toolbar">
                   <FilterSelect
                     label="Условия"
@@ -301,8 +305,13 @@ export function ResultsPage({
                   )}
                 </div>
               </details>
+              {filtering && (
+                <button type="button" className="button quiet reset-filters" onClick={reset}>Сбросить</button>
+              )}
+                </div>
+              )}
               {visible.length ? (
-                <div className="split">
+                <div className="split results-layout">
                   <div className="stack">
                     <ResultsTable rows={visible} selected={selected} issues={byResult} onSelect={select} />
                     <Note title="Сначала сравните контекст.">

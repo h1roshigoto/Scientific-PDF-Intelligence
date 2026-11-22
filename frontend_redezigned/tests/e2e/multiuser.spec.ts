@@ -62,6 +62,9 @@ test('Alice and Bob independently register, analyze, review and export through s
   expect((await page.request.post('/api/auth/logout', { headers: { Origin: multiuserUrl } })).status()).toBe(403);
   await page.reload();
   await expect(panel(page)).toBeVisible();
+  await page.getByRole('link', { name: 'Scientific PDF Intelligence', exact: true }).click();
+  await page.getByRole('link', { name: 'Загрузить PDF', exact: true }).click();
+  await expect(panel(page)).toBeVisible();
   await expect(page.getByLabel('Токен доступа')).toHaveCount(0);
   const storage = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, cookie: document.cookie }));
   expect(storage).not.toContain(password);

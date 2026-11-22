@@ -52,9 +52,14 @@ export function HomePage() {
             <div className={styles.heroCopy}>
               <h1 id="home-title"><span>Scientific PDF</span>{' '}<span>Intelligence</span></h1>
               <p>Находите показатели в научных PDF, изучайте контекст и сверяйте значения с первоисточником.</p>
-              <Link className={styles.cta} href={sectionUrl('results')}>
-                Начать работу <span className={`${styles.icon} ${styles.nextIcon}`} aria-hidden="true" />
-              </Link>
+              <div className={styles.heroActions}>
+                {provider.mode === 'api' && <Link className={styles.cta} href={sectionUrl('documents')}>
+                  Загрузить PDF <span className={`${styles.icon} ${styles.fileIcon}`} aria-hidden="true" />
+                </Link>}
+                <Link className={provider.mode === 'api' ? styles.secondaryCta : styles.cta} href={sectionUrl('results')}>
+                  Начать работу <span className={`${styles.icon} ${styles.nextIcon}`} aria-hidden="true" />
+                </Link>
+              </div>
             </div>
             <div className={styles.trace}>
               <div className={styles.traceSheets} aria-hidden="true"><span /><span /><span /></div>

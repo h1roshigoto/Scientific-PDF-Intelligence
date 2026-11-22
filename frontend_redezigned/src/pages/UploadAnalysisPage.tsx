@@ -5,7 +5,7 @@ import { PageHeading } from '../components/Shell';
 import { UploadExport } from '../components/UploadExport';
 import { PrivateUploadAccess } from '../components/UploadPanel';
 import type { UploadCredentials } from '../components/UploadPanel';
-import { UploadStatus } from '../components/UploadProcessing';
+import { processingActive, UploadStatus, useUploadProcessing } from '../components/UploadProcessing';
 import { ReviewBadge, ReviewWarnings, UploadReview } from '../components/UploadReview';
 import type { StoredUpload, UploadClient } from '../data';
 import { formatValue, sourceLabel } from '../domain';
@@ -41,16 +41,21 @@ function UploadAnalysis({ api, upload, token }: UploadViewProps) {
           if (filter === 'pending') return !isApproved(review.status) && review.status !== 'rejected';
           return true;
         });
-        return (
+        const results = (
           <section className="surface" aria-label="Результаты анализа">
             <header className="section-bar"><h2>{upload.original_filename}</h2></header>
             <div className="upload-content">
               <UploadStatus state={state} />
-              {state.mode === 'local' && <p className="muted">Локальный анализ извлекает значения из доступных таблиц.</p>}
+              {state.mode === 'local' && <p className="muted">Локальный анализ извлекает значения с однозначной привязкой к таблице или тексту PDF.</p>}
               {state.human_review_required && <p>Научные записи и охват публикации требуют проверки человеком.</p>}
               {!state.counts && <button className="button" type="button" onClick={data.retry}>Обновить состояние</button>}
               {pdf !== 'valid' && <p role="alert">Оригинал PDF отсутствует или его SHA-256 изменился.</p>}
-              {state.status === 'completed' && state.counts?.results === 0 && <p>Научные записи не извлечены.</p>}
+              {state.counts?.results === 0 && <p>Научные записи не извлечены. {state.pages_needing_ocr.length > 0
+                ? 'В документе есть страницы, для которых требуется OCR.'
+                : state.coverage === 'present_not_extractable'
+                  ? 'Исходные таблицы или значения требуют ручной сверки. Подробности в научных замечаниях.'
+                  : state.coverage === 'no_supported_metrics' ? 'В доступном тексте не найдено значений выбранных метрик.'
+                    : 'Проверьте состояние обработки и научные замечания.'}</p>}
               {reviews.length > 0 && <div className="upload-form review-filters">
                 <label>Статус проверки<select value={filter} onChange={(event) => setFilter(event.target.value)}>
                   <option value="all">Все</option><option value="pending">Ожидают проверки</option>
@@ -78,9 +83,35 @@ function UploadAnalysis({ api, upload, token }: UploadViewProps) {
             </div>
           </section>
         );
+        return <div className="stack">
+          {results}
+          {state.counts && !processingActive(state.status) && pdf === 'valid'
+            && <UploadExport api={api} upload={upload} token={token} />}
+        </div>;
       }}
     </LoadBoundary>
   );
+}
+
+function UploadAnalysisView(props: UploadViewProps) {
+  const { api, upload, token } = props;
+  const { state, pollError, refresh } = useUploadProcessing(api, upload.upload_id, token);
+  if (!state) return pollError
+    ? <Feedback kind="error" title="Не удалось проверить состояние анализа" retry={refresh}>{pollError}</Feedback>
+    : <Feedback kind="loading" title="Проверяем состояние анализа…" />;
+  if (state.counts && !processingActive(state.status)) return <UploadAnalysis {...props} />;
+
+  return <section className="surface" aria-label="Результаты анализа">
+    <header className="section-bar"><h2>{upload.original_filename}</h2></header>
+    <div className="upload-content">
+      <UploadStatus state={state} />
+      {processingActive(state.status) && <p>Результаты и экспорт появятся после обработки PDF.</p>}
+      {state.status === 'not_started' && <p>Запустите анализ в разделе «Мои загрузки».</p>}
+      {state.status === 'failed' && <p>Сохранённых результатов пока нет.{state.retry_allowed && ' Повторите анализ в разделе «Мои загрузки».'}</p>}
+      {pollError && <p role="alert">Не удалось обновить состояние. {pollError}</p>}
+      {(pollError || !processingActive(state.status)) && <button className="button" type="button" onClick={refresh}>Обновить состояние</button>}
+    </div>
+  </section>;
 }
 
 export function UploadAnalysisPage({ uploadId, resultId, ...credentials }: UploadCredentials & {
@@ -98,10 +129,7 @@ export function UploadAnalysisPage({ uploadId, resultId, ...credentials }: Uploa
             const upload = records.find((row) => row.upload_id === uploadId);
             if (!upload) return <Feedback kind="empty" title="Загрузка не найдена" />;
             const props = { api, upload, token: credentials.token };
-            return resultId ? <UploadResultReview {...props} resultId={resultId} /> : <>
-              <UploadAnalysis {...props} />
-              <UploadExport key={upload.upload_id} {...props} />
-            </>;
+            return resultId ? <UploadResultReview {...props} resultId={resultId} /> : <UploadAnalysisView {...props} />;
           }}
         </PrivateUploadAccess>
       ) : <Feedback kind="empty" title="Приватные загрузки недоступны" />}

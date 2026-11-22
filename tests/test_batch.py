@@ -75,7 +75,7 @@ def test_rag_schema_update_reuses_legacy_solar_checkpoint(tmp_path, monkeypatch)
     path = make_pdf(tmp_path / "D001.pdf")
     store = Store(tmp_path / "state")
     with monkeypatch.context() as legacy:
-        legacy.setitem(batch.SCHEMA_VERSIONS, "solar", "batch-evidence-7")
+        legacy.setitem(batch.SCHEMA_VERSIONS, "rag", "batch-evidence-11")
         first = run_batch(store, [path], "solar", local_only=True)
 
     assert first["requests_this_run"]

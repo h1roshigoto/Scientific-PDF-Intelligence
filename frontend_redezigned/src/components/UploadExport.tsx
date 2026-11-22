@@ -50,11 +50,14 @@ export function UploadExport({ api, upload, token }: { api: UploadClient; upload
           {(data) => {
             const { review_counts: counts, issue_counts: issues, ocr_pending_pages: pages } = data.validation;
             return <>
-              <p className="num">Подтверждено исходных — {counts.approved} · Подтверждено исправленных — {counts.approved_corrected}
+              <p className="num">Автоматически извлечено — {counts.automatic}{' · '}Подтверждено исходных — {counts.approved} · Подтверждено исправленных — {counts.approved_corrected}
                 {' · '}Ожидают решения — {counts.pending} · Предложено исправлений — {counts.correction_proposed}
                 {' · '}Отклонено — {counts.rejected} · Устарело — {counts.stale} · Замечаний — {issues.total}</p>
               <p>Страниц в ожидании OCR — {pages.length}</p>
               {data.metadata.processing_status === 'failed' && <p>Анализ завершился с ошибкой. Доступен сохранённый частичный снимок.</p>}
+              {counts.approved + counts.approved_corrected === 0 && <p>{counts.automatic > 0
+                ? 'CSV и JSON заполняются после подтверждения кандидатов. Исходные кандидаты есть в журнале проверок внутри ZIP.'
+                : 'В CSV и JSON пока нет научных записей. В ZIP доступны сведения об обработанных страницах и замечаниях.'}</p>}
               <ul className="muted">
                 {data.validation.warnings.map(({ code }) => <li key={code}>{warnings[code]}</li>)}
               </ul>

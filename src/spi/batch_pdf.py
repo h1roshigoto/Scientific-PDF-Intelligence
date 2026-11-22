@@ -11,15 +11,26 @@ import pymupdf
 from .gigachat_evidence import Block, _NUMBER
 
 
-CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)\s*(?:[.:|–—]|$)", re.I)
+CAPTION = re.compile(r"^\s*((?:Table|Fig(?:ure)?\.?)\s+[A-Z]?\d+[a-z]?)(?:\s*(?:[.:|–—]|$)|(?<=\d)[\u2002\u2003\u2009\u202f])", re.I)
 CELL = re.compile(rf"({_NUMBER})(?:\s*(±\s*{_NUMBER}))?(?:\s*(%|[A-Za-zµμΩΩ][\wµμ²^/ ()⁻−-]*))?")
 RECORD = re.compile(rf"\(({_NUMBER})\)")
-LAYOUT_VERSION = f"batch-layout-10/pymupdf-{pymupdf.VersionBind}"
+LAYOUT_VERSION = f"batch-layout-11/pymupdf-{pymupdf.VersionBind}"
 UNIT_ONLY = re.compile(r"^\([^()]+\)\s*[↑↓]?$")
 SCAN_AXES = {"scan direction", "sweep direction"}
 SCAN_DIRECTIONS = {"forward", "reverse", "average"}
 RETRIEVER_AXES = {"retriever", "retriever model", "retrieval method", "encoder", "reranker"}
 METRIC_AXIS = "metric"
+PV_DEVICE = re.compile(
+    r"(?P<device>(?:as[- ]fabricated|fabricated) [^.!?]{5,140}?\bdevice) "
+    rf"(?:shows|showed|exhibited|achieved)\s+(?P<value>{_NUMBER}\s*%)\s+power conversion efficiency",
+    re.I,
+)
+PV_CONTINUATION = re.compile(
+    rf"^\(PCE\) with (?:\u00ad)?(?P<j>J\s*sc)\s*=\s*(?P<jv>{_NUMBER}\s*mA\s*/\s*cm[2²]),"
+    rf"\s*(?:\u00ad)?(?P<v>V\s*oc)\s*=\s*(?P<vv>{_NUMBER}\s*m?V)\s+and\s+"
+    rf"(?P<f>FF)\s*=\s*(?P<fv>{_NUMBER}\s*%)\s*[.]",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +41,7 @@ class Cell:
     aggregation: str | None = None
     row_axis: Block | None = None
     model_header_unresolved: bool = False
+    metric_on_row: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,7 +67,8 @@ class Fragment:
                 {"cell": cell.value.block_id, "row": [b.block_id for b in cell.row],
                  "headers": [b.block_id for b in cell.headers], "aggregation": cell.aggregation,
                  "row_axis": cell.row_axis.block_id if cell.row_axis else None,
-                 **({"model_header_unresolved": True} if cell.model_header_unresolved else {})}
+                 **({"model_header_unresolved": True} if cell.model_header_unresolved else {}),
+                 **({"metric_on_row": True} if cell.metric_on_row else {})}
                 for cell in self.cells
             ],
         }
@@ -113,7 +126,7 @@ def _bands(lines):
 
 
 def _caption_location(block):
-    return CAPTION.match(block.text)[1].replace(".", "")
+    return " ".join(CAPTION.match(block.text)[1].replace(".", "").split())
 
 
 def _ruled(page, caption, tables):
@@ -357,8 +370,8 @@ def _borderless(caption, lines, support, *, row_metrics=False):
         if caption in labels:
             break
         if not labels:
-            if (levels and row_axis is None and len(row) == 1 and row[0].text.casefold() in RETRIEVER_AXES
-                    and abs(row[0].bbox[0] - first_row[0].bbox[0]) <= 8):
+            if (levels and row_axis is None and len(row) == 1 and row[0].text.casefold() in RETRIEVER_AXES | {"rag method"}
+                    and abs(row[0].bbox[0] - first_row[0].bbox[0]) <= 12):
                 row_axis = row[0]
             continue
         if not levels and len(labels) == 1:
@@ -417,12 +430,139 @@ def _borderless(caption, lines, support, *, row_metrics=False):
     prior_band = max(-1, first_band - 2)
     for row_band, _, row, _ in grid:
         for _, intermediate in bands[max(0, prior_band + 1):row_band]:
-            if len(intermediate) == 1 and not _number(intermediate[0]) and center(intermediate[0]) > columns[0] + pitch:
-                group = intermediate[0]
+            if len(intermediate) == 1 and not _number(intermediate[0]):
+                block = intermediate[0]
+                if center(block) > columns[0] + pitch or (
+                    row_axis and row_axis.text.casefold() == "rag method"
+                    and abs(block.bbox[0] - row_axis.bbox[0]) <= 5
+                    and re.fullmatch(r"[A-Z][\w.-]{1,18}", block.text)
+                ):
+                    group = block
         row_path = (group, row[0]) if group else (row[0],)
         cells.extend(Cell(cell, row_path, headers, row_axis=row_axis, model_header_unresolved=model_header_unresolved)
                      for cell, headers in zip(row[1:], header_paths, strict=True))
         prior_band = row_band
+    return cells
+
+
+def _caption_column(page, caption, lines, support):
+    left = caption.bbox[0] - 36
+    end = max(b.bbox[2] for b in support if b.block_id.startswith(f"p{page.number + 1}-"))
+    middle = page.rect.width / 2
+    has_right_column = any(middle <= b.bbox[0] <= middle + 45
+                           and b.bbox[2] - b.bbox[0] >= page.rect.width * .24
+                           for b, _ in lines)
+    right = (middle + 4 if end < middle and caption.bbox[0] < middle and has_right_column
+             else page.rect.x1)
+    peers = [b.bbox[0] for b, _ in lines if end < b.bbox[0] < right and CAPTION.match(b.text)
+             and abs(b.bbox[1] - caption.bbox[1]) <= 72]
+    if peers:
+        right = min(peers) - 2
+    return [(block, y) for block, y in lines if left <= block.bbox[0] and block.bbox[2] <= right]
+
+
+def _sparse_metric_grid(caption, lines, support, metric_label):
+    """Link optional values to printed columns, keeping missing cells in their slots."""
+    bands = _bands(lines)
+    top = max(b.bbox[3] for b in support if b.block_id.split("-")[0] == caption.block_id.split("-")[0])
+    boundaries = [b.bbox[1] for b, _ in lines if b != caption and CAPTION.match(b.text)]
+    grids = []
+    for index, (y, header) in enumerate(bands):
+        after = 0 < header[0].bbox[1] - top < 100
+        before = 0 < caption.bbox[1] - y < 180 and not any(y - 95 < b < y for b in boundaries)
+        if len(header) < 2 or not (after or before):
+            continue
+        if any(min(y, caption.bbox[1]) < bound < max(y, caption.bbox[1]) for bound in boundaries):
+            continue
+        axis, *leaves = header
+        numeric_axis = axis.text.casefold() in {"nodes", "graph size"}
+        if not numeric_axis and not re.fullmatch(
+            r"(?:(?:rag |retrieval )?methods?|model|device|sample|configuration|variant|system)",
+            axis.text, re.I,
+        ):
+            continue
+        # A second, independently labelled stub starts a separate grid.
+        stop = next((j for j, b in enumerate(leaves) if b.text.casefold() == axis.text.casefold()), len(leaves))
+        right = (leaves[stop - 1].bbox[2] + leaves[stop].bbox[0]) / 2 if 0 < stop < len(leaves) else float("inf")
+        leaves = leaves[:stop]
+        if not leaves:
+            continue
+        if not any(metric_label(b.text) for b in leaves) and not (
+            re.search(r"\b(?:evaluation|performance|experimental results)\b", caption.text, re.I)
+            and all(re.fullmatch(r"[a-z][\w.-]{1,24}", b.text, re.I) for b in leaves)
+        ):
+            continue
+        if min((center(b) - center(a) for a, b in zip(leaves, leaves[1:])), default=20) < 7:
+            continue
+        paths = [(b,) for b in leaves]
+        if index and 0 < y - bands[index - 1][0] < 23:
+            parents = [b for b in bands[index - 1][1] if b not in support
+                       and axis.bbox[2] - 3 < center(b) < right]
+            groups = _aligned_groups(parents, [center(b) for b in leaves])
+            if groups:
+                paths = [(parent, leaf) for parent, leaf in zip(groups, leaves, strict=True)]
+        rows = []
+        previous = y
+        for row_y, row in bands[index + 1:]:
+            if row_y - previous > 27 or (before and row_y >= caption.bbox[1]) or any(
+                y < bound < row_y for bound in boundaries
+            ):
+                break
+            row = [b for b in row if b.bbox[2] <= right]
+            if not row:
+                break
+            label, *values = row
+            if (abs(label.bbox[0] - axis.bbox[0]) > max(45, axis.bbox[0] - caption.bbox[0] + 10)
+                    or label.bbox[2] > leaves[0].bbox[0] + 4 or not values
+                    or bool(re.fullmatch(_NUMBER, label.text)) != numeric_axis):
+                break
+            slots = {}
+            for value in values:
+                if not _number(value) and value.text not in {"-", "–", "—", "N/A"}:
+                    break
+                distances = [min(abs(value.bbox[0] - leaf.bbox[0]), abs(center(value) - center(leaf)),
+                                 abs(value.bbox[2] - leaf.bbox[2])) for leaf in leaves]
+                distance = min(distances)
+                if distance > 8 or sum(other <= distance + 1 for other in distances) != 1:
+                    break
+                slot = distances.index(distance)
+                if slots and slot <= next(reversed(slots)):
+                    break
+                slots[slot] = value
+            if len(slots) != len(values) or len(slots) < (len(leaves) + 1) // 2:
+                break
+            rows.append([Cell(value, (label,), paths[slot], row_axis=axis)
+                         for slot, value in slots.items() if _number(value)])
+            previous = row_y
+        if len(rows) >= 2 and all(rows):
+            grids.append([cell for row in rows for cell in row])
+    return grids[0] if len(grids) == 1 else []
+
+
+def _rag_summary_rows(caption, lines, metric_label):
+    """Read labelled summary rows beneath a categorical ground-truth comparison."""
+    if not re.search(r"\bpredicted\b.+\btypes per character\b", caption.text, re.I):
+        return []
+    bands = _bands(lines)
+    candidates = [(i, y, row) for i, (y, row) in enumerate(bands)
+                  if 0 < y - caption.bbox[1] < 65 and len(row) >= 3 and row[-1].text == "GT"]
+    if len(candidates) != 1:
+        return []
+    index, y, headers = candidates[0]
+    cells = []
+    for row_y, row in bands[index + 1:]:
+        if row_y - y > 24 or row_y - bands[index][0] > 155 or any(CAPTION.match(b.text) for b in row):
+            break
+        y = row_y
+        label, *values = row
+        if not metric_label(label.text):
+            continue
+        if (len(values) != len(headers) or values[-1].text not in {"-", "–", "—"}
+                or not all(_number(b) for b in values[:-1])
+                or not all(abs(center(h) - center(v)) <= 7 for h, v in zip(headers, values, strict=True))):
+            continue
+        cells.extend(Cell(value, (label,), (header,), metric_on_row=True)
+                     for header, value in zip(headers[:-1], values[:-1], strict=True))
     return cells
 
 
@@ -435,6 +575,12 @@ def _caption_blocks(caption, lines):
                   and 0 < b.bbox[0] - caption.bbox[2] <= 12 and not CAPTION.match(b.text)]
         if len(inline) == 1:
             support += tuple(inline)
+    if support and support[-1].text.endswith("-"):
+        last = support[-1]
+        next_line = [b for b, _ in lines if b not in support and 0 <= b.bbox[1] - last.bbox[3] <= 5
+                     and abs(b.bbox[0] - last.bbox[0]) <= 4 and re.match(r"^[a-z0-9]", b.text)]
+        if len(next_line) == 1:
+            support += tuple(next_line)
     return support
 
 
@@ -526,6 +672,59 @@ def _figure_claims(page, caption, support, blocks):
     return fragments
 
 
+def photovoltaic_claims(lines_by_page):
+    """Read a printed J-V performance sentence that continues onto the next page."""
+    for page, lines in lines_by_page.items():
+        figures = [b for b, _ in lines if CAPTION.match(b.text) and re.search(r"J[–-]V characteristics", b.text, re.I)]
+        if len(figures) != 1:
+            continue
+        caption, = figures
+        location = _caption_location(caption)
+        refs = [b for b, _ in lines if re.search(
+            rf"\bFig(?:ure)?[.]?\s+{re.escape(location.split()[-1])}[a-z]?\s+shows\b", b.text, re.I
+        )]
+        for ref in refs:
+            stem = ref.block_id.rsplit("-l", 1)[0]
+            paragraph = [b for b, _ in lines if b.block_id.startswith(stem + "-l")]
+            if len(paragraph) < 2:
+                continue
+            last = paragraph[-2:]
+            match = PV_DEVICE.search(" ".join(" ".join(b.text.split()) for b in last))
+            if not match or not re.search(r"power conversion efficiency\s*$", last[-1].text, re.I):
+                continue
+            next_lines = [b for b, _ in lines_by_page.get(page + 1, ())
+                          if b.bbox[1] < 100 and re.match(r"^\(PCE\) with\b", b.text)]
+            if len(next_lines) != 1:
+                continue
+            first, = next_lines
+            following = [b for b, _ in lines_by_page[page + 1] if 0 <= b.bbox[1] - first.bbox[1] <= 19
+                         and b != first and abs(b.bbox[0] - first.bbox[0]) <= 5]
+            if len(following) != 1:
+                continue
+            second, = following
+            continuation = PV_CONTINUATION.match(" ".join((first.text + " " + second.text).split()))
+            if not continuation:
+                continue
+            device = Block(last[0].block_id + "-pv-name", tuple(pymupdf.Rect(last[0].bbox) |
+                           pymupdf.Rect(last[-1].bbox)), match["device"])
+            axis = Block(ref.block_id + "-pv-device", ref.bbox, ref.text)
+            entries = [(page, last[-1], "power conversion efficiency", match["value"])]
+            entries += [(page + 1, block, continuation[label], continuation[label + "v"])
+                        for block, label in ((first, "j"), (first, "v"), (second, "f"))]
+            for number, printed, label, value in entries:
+                # Keep the PDF spacing in the evidence used by the private review.
+                raw = re.search(r"\s+".join(map(re.escape, value.split())), printed.text)
+                if raw is None:
+                    continue
+                source = Block(printed.block_id + "-" + label.replace(" ", "-") + "-value", printed.bbox, raw[0])
+                heading = Block(printed.block_id + "-" + label.replace(" ", "-") + "-label", printed.bbox, label)
+                support = (ref, *last, first, second)
+                yield Fragment(source.block_id, number, tuple(dict.fromkeys(
+                    (caption, source, heading, device, axis, *support)
+                )), (Cell(source, (device,), (heading,), row_axis=axis),), caption, location,
+                    (caption,), support)
+
+
 def _centered_row_groups(caption, lines):
     # A printed benchmark label can be vertically centred across two model rows.
     bands = _bands((b, y) for b, y in lines if abs(y - caption.bbox[1]) < 150)
@@ -558,9 +757,12 @@ def _centered_row_groups(caption, lines):
     return cells
 
 
-def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=None, row_metrics=False):
+def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=None, row_metrics=False,
+                   metric_label=None, solar_lines=None):
     numeric_superscripts = []
     lines = list(_lines(page, numeric_superscripts))
+    if solar_lines is not None:
+        solar_lines[page.number + 1] = lines
     captions = []
     for block, _ in lines:
         if CAPTION.match(block.text):
@@ -582,16 +784,30 @@ def page_fragments(page, blocks, relevant, *, tables=True, previous_captions=Non
             for b in support if b.block_id.startswith(f"p{page.number + 1}-") for span in numeric_superscripts
         )
         # Geometric reconstruction often recovers merged headers in sparse ruled tables.
-        cells = _borderless(caption, lines, support, row_metrics=row_metrics) or _ruled(page, caption, ruled)
+        scoped_lines = _caption_column(page, caption, lines, support)
+        geometric = _borderless(caption, lines, support, row_metrics=row_metrics)
+        if not geometric and scoped_lines != lines:
+            geometric = _borderless(caption, scoped_lines, support, row_metrics=row_metrics)
+        if metric_label is not None and row_metrics and not any(
+            metric_label(block.text) for cell in geometric for block in (*cell.headers, *cell.row)
+        ):
+            geometric = (_sparse_metric_grid(caption, scoped_lines, support, metric_label)
+                         or _rag_summary_rows(caption, scoped_lines, metric_label) or geometric)
+        cells = geometric or _ruled(page, caption, ruled)
         if not cells and re.search(r"average and record \(between parentheses\)", caption_text, re.I):
             cells = _mean_record(caption, lines)
         if not cells:
             cells = _centered_row_groups(caption, lines)
         if row_metrics and any(_numeric_cell(header) for cell in cells for header in cell.headers):
             cells = []
+        if re.search(r"\b(?:work genres|design solutions|groups of instances|existing instances vs|distribution of similarity scores)\b",
+                     caption_text, re.I):
+            issues.append({"reason": "table_outside_metric_scope", "page": page.number + 1,
+                           "location": location, "quote": caption_text, "source_block_id": caption.block_id})
+            continue
         if not cells:
             issues.append({"reason": "table_layout_unresolved", "page": page.number + 1,
-                           "location": location, "quote": caption.text, "source_block_id": caption.block_id})
+                           "location": location, "quote": caption_text, "source_block_id": caption.block_id})
             continue
         for _, row in groupby(cells, key=lambda cell: cell.row):
             row = list(row)

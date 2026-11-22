@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react';
-import { createApiProvider, createUploadClient } from './data';
+import { createApiProvider } from './data';
 import type { UploadClient } from './data';
 import { createMockProvider } from './mock';
 
@@ -13,6 +13,5 @@ export const provider = import.meta.env.DEV && import.meta.env.VITE_DATA_SOURCE 
   ? createMockProvider({ base: `${import.meta.env.BASE_URL}demo` })
   : createApiProvider({ base: import.meta.env.VITE_API_BASE || '/api', csvBase: import.meta.env.VITE_CSV_ARTIFACT_BASE, passport });
 
-export const uploadClient = provider.mode === 'api' ? createUploadClient() : undefined;
 export const UploadClientContext = createContext<UploadClient | undefined>(undefined);
-export const useUploadClient = () => useContext(UploadClientContext) ?? uploadClient;
+export const useUploadClient = () => useContext(UploadClientContext);

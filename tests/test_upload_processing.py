@@ -131,7 +131,8 @@ def test_empty_result_and_layout_issue_are_distinct(private_uploads):
         start(client, url)
         assert worker().run_one()
         assert get(client, url, "results") == []
-    assert get(client, empty)["status"] == "completed"
+    assert get(client, empty)["status"] == "needs_review"
+    assert get(client, empty)["coverage"] == "no_supported_metrics"
     state = get(client, unresolved)
     assert state["status"] == "needs_review"
     assert state["counts"]["unresolved"] == 1
@@ -230,7 +231,7 @@ def test_integrity_failure_can_retry_after_original_restored(private_uploads):
     path.write_bytes(content)
     assert start(client, url)["job_id"] != first["job_id"]
     assert worker().run_one()
-    assert get(client, url)["status"] == "completed"
+    assert get(client, url)["coverage"] == "no_supported_metrics"
 
 
 def test_worker_rejects_catalog_domain_changed_after_enqueue(private_uploads):
@@ -309,3 +310,44 @@ upload_worker.main()
     assert finished["status"] == "completed"
     assert len(get(client, url, "results")) == 4
     assert fragment_ids <= set(json.loads(checkpoint.read_text(encoding="utf-8"))["fragments"])
+
+def test_updated_extractor_preserves_previous_checkpoint(private_uploads, tmp_path):
+    client = TestClient(app)
+    url = upload(client, make_pdf(tmp_path / "D001.pdf").read_bytes())
+    first = start(client, url)
+    assert worker().run_one()
+    root = private_uploads["SPI_UPLOAD_PROCESS_STATE_DIR"] / first["upload_id"]
+    checkpoint = next((root / "batch" / "solar").glob("*.json"))
+    previous = json.loads(checkpoint.read_text(encoding="utf-8"))
+    previous["revision"] += "-old"
+    checkpoint.write_text(json.dumps(previous), encoding="utf-8")
+    original_results = get(client, url, "results")
+    assert get(client, url)["reanalysis_available"]
+    assert start(client, url)["job_id"] != first["job_id"]
+    assert worker().run_one()
+    assert get(client, url, "results") == original_results
+    assert not get(client, url)["reanalysis_available"]
+    history, = (root / "batch-history").glob("*.json")
+    assert json.loads(history.read_text(encoding="utf-8")) == previous
+
+
+def test_demo_keeps_local_results_when_model_is_unavailable(private_uploads, tmp_path, monkeypatch):
+    monkeypatch.setenv("SPI_DEMO_MODEL_FALLBACK", "true")
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "synthetic")
+
+    def unavailable(*args, **kwargs):
+        raise GigaChatError("oauth", "unavailable")
+
+    monkeypatch.setattr(upload_worker, "GigaChatClient", unavailable)
+    client = TestClient(app)
+    path = make_pdf(tmp_path / "D001.pdf")
+    with pymupdf.open(path) as pdf:
+        pdf[0].insert_text((45, 280), "Our measured power conversion efficiency was 15.5% in this experiment.")
+        content = pdf.tobytes()
+    url = upload(client, content)
+    start(client, url)
+    assert worker(model_enabled=True).run_one()
+    state = get(client, url)
+    assert state["status"] == "completed"
+    assert state["diagnostic"] == "model_enrichment_incomplete"
+    assert len(get(client, url, "results")) == 4

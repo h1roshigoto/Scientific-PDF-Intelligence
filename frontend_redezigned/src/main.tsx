@@ -9,7 +9,7 @@ import { UploadPanel } from './components/UploadPanel';
 import { createAccountClient, createUploadClient, DataError, errorMessage } from './data';
 import type { AccountSession } from './data';
 import { useData } from './hooks/useData';
-import { getFilters, navigate, parseRoute, useLocation } from './navigation';
+import { getFilters, Link, navigate, parseRoute, useLocation } from './navigation';
 import { AccountPage, SignIn } from './pages/AccountPage';
 import { ChecksPage } from './pages/ChecksPage';
 import { DocumentsPage, DocumentSource } from './pages/DocumentsPage';
@@ -21,9 +21,15 @@ import { UploadAnalysisPage } from './pages/UploadAnalysisPage';
 import { provider, UploadClientContext } from './provider';
 import './styles/index.css';
 
-function PrivateApp() {
+function PrivateApp({ demoAccess = false }: { demoAccess?: boolean }) {
   const url = useLocation();
-  const [uploadToken, setUploadToken] = useState('');
+  const [access, setAccess] = useState({ token: '', expired: false });
+  const setToken = useCallback((token: string) => setAccess({ token, expired: false }), []);
+  const uploads = useMemo(() => provider.mode === 'api' ? createUploadClient(fetch, demoAccess ? { mode: 'demo-access' } : {
+    mode: 'private', onUnauthorized: (token) => {
+      setAccess((current) => current.token === token ? { token: '', expired: true } : current);
+    },
+  }) : undefined, [demoAccess]);
   const previousPath = useRef(url.pathname);
 
   useEffect(() => {
@@ -37,6 +43,7 @@ function PrivateApp() {
 
   const filters = getFilters(url.searchParams);
   const selected = url.searchParams.get('selected');
+  const credentials = { ...access, setToken: demoAccess ? undefined : setToken };
 
   let content;
   if (route.view === 'not-found') {
@@ -55,10 +62,9 @@ function PrivateApp() {
       />
     );
   } else if (route.view === 'upload-analysis') {
-    content = <UploadAnalysisPage uploadId={route.uploadId} resultId={route.resultId}
-      token={uploadToken} setToken={setUploadToken} />;
+    content = <UploadAnalysisPage key={route.uploadId} uploadId={route.uploadId} resultId={route.resultId} {...credentials} />;
   } else if (route.section === 'documents') {
-    content = <DocumentsPage query={filters.query} uploadToken={uploadToken} setUploadToken={setUploadToken} />;
+    content = <DocumentsPage query={filters.query} {...credentials} />;
   } else if (route.section === 'checks') {
     content = <ChecksPage selected={selected} />;
   } else if (route.section === 'export') {
@@ -68,9 +74,9 @@ function PrivateApp() {
   }
 
   return (
-    <Shell section={route.section} mock={provider.mode === 'mock'}>
-      {content}
-    </Shell>
+    <UploadClientContext.Provider value={uploads}>
+      <Shell section={route.section} mock={provider.mode === 'mock'}>{content}</Shell>
+    </UploadClientContext.Provider>
   );
 }
 
@@ -114,7 +120,12 @@ function AccountWorkspace({ session, onExpired, onLogout }: {
     content = <AccountPage session={session} api={auth} onLogout={onLogout} />;
   } else if (route.view === 'upload-analysis') {
     content = <UploadAnalysisPage key={route.uploadId} uploadId={route.uploadId} resultId={route.resultId} token="" />;
-  } else if (route.view === 'home' || (route.view === 'list' && route.section === 'documents')) {
+  } else if (route.view === 'home') {
+    content = <WorkspacePage title="Scientific PDF Intelligence"
+      subtitle="Загрузите научный PDF, запустите анализ и сверьте результаты с оригиналом.">
+      <Link className="button primary" href="/documents">Загрузить PDF</Link>
+    </WorkspacePage>;
+  } else if (route.view === 'list' && route.section === 'documents') {
     content = <WorkspacePage title="Мои документы"><UploadPanel token="" /></WorkspacePage>;
   } else {
     content = <NotFoundPage />;
@@ -187,7 +198,7 @@ function MultiuserApp() {
 
 function ConfiguredApp() {
   const config = useData(accountApi.config);
-  return <LoadBoundary {...config}>{({ mode }) => mode === 'multiuser' ? <MultiuserApp /> : <PrivateApp />}</LoadBoundary>;
+  return <LoadBoundary {...config}>{({ mode }) => mode === 'multiuser' ? <MultiuserApp /> : <PrivateApp demoAccess={mode === 'demo-access'} />}</LoadBoundary>;
 }
 
 function App() {

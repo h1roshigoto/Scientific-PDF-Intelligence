@@ -3,6 +3,8 @@ name: Deployment and container controls
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [codex/site-release]
 
 permissions:
   contents: read

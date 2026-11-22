@@ -23,13 +23,21 @@ const diagnostics: Record<string, string> = {
   original_sha256_mismatch: 'Контрольная сумма оригинала PDF не совпадает.',
   upload_identity_mismatch: 'Данные задания не совпадают с каталогом загрузок.',
   model_credentials_missing_local: 'GigaChat не настроен. Использован локальный анализ.',
+  model_enrichment_incomplete: 'Дополнительный анализ GigaChat прерван. Локальные результаты сохранены.',
   model_unavailable_for_recovery: 'GigaChat недоступен для продолжения прерванного анализа.',
   request_budget_exhausted: 'Исчерпан лимит запросов к GigaChat. Повтор продолжит анализ с сохранённого этапа.',
   'completion:model_request_quota_full': 'Исчерпан суточный лимит запросов к модели. Лимит обновится в полночь UTC.',
   page_analysis_failed: 'Некоторые страницы не удалось обработать.',
   worker_recovered: 'Worker продолжил прерванную обработку.',
+  processing_error: 'Worker не смог обработать PDF. Повторите анализ.',
+  processing_timeout: 'Истекло время обработки PDF. Можно повторить анализ.',
+  pdf_parser_unavailable: 'Служба чтения PDF недоступна. Повторите анализ после её запуска.',
+  storage_full: 'Не хватает места для сохранения анализа.',
+  batch_failed: 'Не удалось сохранить результаты анализа PDF.',
+  upload_page_count_mismatch: 'Число прочитанных страниц не совпало с данными загрузки.',
 };
-const active = (status?: UploadProcessing['status']) => status === 'queued' || status === 'processing';
+export const processingActive = (status?: UploadProcessing['status']) => status === 'queued' || status === 'processing';
+const pollInterval = 1500;
 
 export function UploadStatus({ state }: { state: UploadProcessing }) {
   const { status, step, updated_at: updatedAt, diagnostic, counts, pages_needing_ocr: ocr } = state;
@@ -40,43 +48,54 @@ export function UploadStatus({ state }: { state: UploadProcessing }) {
       {diagnostic && <p>{Object.hasOwn(diagnostics, diagnostic) ? diagnostics[diagnostic] : `Диагностика — ${diagnostic}`}</p>}
       {counts && <p className="muted">Обработано страниц — {counts.pages_analyzed} из {counts.pages}
         {' · '}Результатов — {counts.results}{' · '}Замечаний — {counts.issues}</p>}
-      {counts && counts.unresolved > 0 && <p>Нерешённых фрагментов или страниц — {counts.unresolved}</p>}
+      {counts && counts.tables_detected > 0 && <p>Обнаружено таблиц — {counts.tables_detected}
+        {' · '}Размечено — {counts.tables_parsed}{' · '}Требуют проверки — {counts.tables_needing_review}
+        {counts.tables_outside_scope > 0 && ' · Вне выбранных метрик — ' + counts.tables_outside_scope}</p>}
       {counts && counts.pending_fragments > 0 && <p>Ожидают обработки фрагменты — {counts.pending_fragments}</p>}
-      {ocr.length > 0 && <p>Ожидают OCR страницы — {ocr.join(', ')}</p>}
+      {ocr.length > 0 && <p>Требуется OCR для страниц {ocr.join(', ')}. В этом режиме OCR не выполняется.</p>}
     </div>
   );
 }
 
-export function UploadProcessingControls({ api, id, token, listRevision }: {
-  api: UploadClient; id: string; token: string; listRevision: number;
-}) {
+export function useUploadProcessing(api: UploadClient, id: string, token: string, listRevision = 0) {
   const [state, setState] = useState<UploadProcessing>();
-  const [error, setError] = useState('');
+  const [pollError, setPollError] = useState('');
+  const [submitError, setSubmitError] = useState('');
   const [request, setRequest] = useState(0);
   const [accepted, setAccepted] = useState<UploadProcessing['status']>();
   const [pending, setPending] = useState(false);
+  const watching = useRef(false);
+  const pollRequest = useRef<AbortController>(null);
   const submit = useRef<AbortController>(null);
 
   useEffect(() => () => submit.current?.abort(), []);
 
   useEffect(() => {
+    if (pending) return;
     const controller = new AbortController();
+    pollRequest.current = controller;
     let timer: number | undefined;
-    let waiting = active(accepted);
+    let failures = 0;
 
     async function poll() {
+      if (controller.signal.aborted) return;
+      let delay = pollInterval;
       try {
         const next = await api.processing(id, token, controller.signal);
         if (controller.signal.aborted) return;
         setState(next);
-        setError('');
-        waiting = active(next.status);
+        setPollError('');
+        failures = 0;
+        watching.current = processingActive(next.status);
       } catch (cause) {
         if (controller.signal.aborted) return;
-        setError(errorMessage(cause));
-        if (cause instanceof DataError && (cause.status === 401 || cause.status === 503)) waiting = false;
+        setPollError(errorMessage(cause));
+        if (cause instanceof DataError && (cause.status === 401 || cause.status === 404)) return;
+        failures += 1;
+        const backoff = pollInterval * 2 ** Math.min(failures, 4);
+        delay = Math.min(60_000, Math.max(backoff, (cause instanceof DataError ? cause.retryAfter ?? 0 : 0) * 1000));
       }
-      if (waiting) timer = window.setTimeout(() => void poll(), 1500);
+      if (watching.current) timer = window.setTimeout(() => void poll(), delay);
     }
 
     // Leave time for an accepted queue status to render before the next read.
@@ -85,44 +104,68 @@ export function UploadProcessingControls({ api, id, token, listRevision }: {
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [api, id, token, request, accepted, listRevision]);
+  }, [api, id, token, request, accepted, listRevision, pending]);
+
+  function refresh() {
+    pollRequest.current?.abort();
+    setPollError('');
+    setRequest((value) => value + 1);
+  }
 
   async function enqueue() {
     if (submit.current) return;
+    pollRequest.current?.abort();
     const controller = new AbortController();
     submit.current = controller;
     setPending(true);
-    setError('');
+    setSubmitError('');
+    setPollError('');
     try {
       const job = await api.process(id, token, controller.signal);
       if (controller.signal.aborted) return;
+      watching.current = true;
       setAccepted(job.status);
       setState(undefined);
-      setRequest((value) => value + 1);
     } catch (cause) {
-      if (!controller.signal.aborted) setError(errorMessage(cause));
+      // A lost response can follow a successful enqueue. Check the queue before enabling Start again.
+      if (!controller.signal.aborted) {
+        setSubmitError(errorMessage(cause));
+        setState(undefined);
+        setAccepted(undefined);
+        watching.current = true;
+      }
     } finally {
       submit.current = null;
-      if (!controller.signal.aborted) setPending(false);
+      if (!controller.signal.aborted) {
+        setPending(false);
+        setRequest((value) => value + 1);
+      }
     }
   }
 
+  return { state, accepted, pending, pollError, submitError, refresh, enqueue };
+}
+
+export function UploadProcessingControls({ api, id, token, listRevision }: {
+  api: UploadClient; id: string; token: string; listRevision: number;
+}) {
+  const { state, accepted, pending, pollError, submitError, refresh, enqueue } = useUploadProcessing(api, id, token, listRevision);
   const start = state?.status === 'not_started';
   const retry = state?.status === 'failed' && state.retry_allowed;
+  const reanalyze = state?.reanalysis_available;
+  const canOpen = state?.counts && !processingActive(state.status);
   return (
     <div className="upload-analysis-controls">
-      {state ? <UploadStatus state={state} /> : <p className="muted" aria-live="polite">
+      {state ? <UploadStatus state={state} /> : (!pollError || accepted) && <p className="muted" aria-live="polite">
         {accepted ? labels[accepted] : 'Проверяем состояние анализа…'}
       </p>}
-      {error && <p role="alert">{error}</p>}
+      {pollError && <p role="alert">Не удалось обновить состояние. {pollError}</p>}
+      {(start || retry || reanalyze || !state) && submitError && <p role="alert">Не удалось подтвердить запуск. {submitError}</p>}
       <div className="upload-actions">
-        {(start || retry) && <button className="button" type="button" disabled={pending} onClick={() => void enqueue()}>
-          {retry ? 'Повторить' : 'Начать анализ'}
-        </button>}
-        {state?.counts && <Link className="button" href={uploadAnalysisUrl(id)}>Посмотреть результаты</Link>}
-        {!state && error && <button className="button quiet" type="button" onClick={() => setRequest((value) => value + 1)}>
-          Обновить состояние
-        </button>}
+        {(pending || start || retry || reanalyze) && <button className="button primary" type="button" disabled={pending || Boolean(pollError)}
+          onClick={() => void enqueue()}>{pending ? 'Запускаем анализ…' : retry ? 'Повторить' : reanalyze ? 'Повторить обновлённым анализом' : 'Начать анализ'}</button>}
+        {canOpen && <Link className="button primary" href={uploadAnalysisUrl(id)}>Посмотреть результаты</Link>}
+        {pollError && <button className="button quiet" type="button" onClick={refresh}>Обновить состояние</button>}
       </div>
     </div>
   );

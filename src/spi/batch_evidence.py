@@ -17,26 +17,29 @@ from .gigachat_evidence import Block, EvidenceError, _NUMBER
 from .models import Evidence, ExtractionMetadata, Metric, ResultRecord, Value
 
 
-SCHEMA_VERSIONS = {"solar": "batch-evidence-7", "rag": "batch-evidence-11"}
+SCHEMA_VERSIONS = {"solar": "batch-evidence-8", "rag": "batch-evidence-12"}
 MODEL_PLAN_VERSION = "table-candidate-v2"
 PROFILES = {"solar": "solar-thin-film-v1", "rag": "rag-evaluation-v1"}
 SOLAR = {
-    "PCE": r"PCE|power conversion efficiency|efficiency",
-    "Voc": r"V[ _]*oc|open.circuit voltage", "Jsc": r"(?:integrated )?J[ _]*sc(?: from (?:IPCE|EQE))?|short.circuit current density",
+    "PCE": r"PCE|power[ _-]+conversion[ _-]+efficiency|efficiency",
+    "Voc": r"V[ _.]*o[ _.]*c|open.circuit voltage", "Jsc": r"(?:integrated )?J[ _.]*s[ _.]*c(?: from (?:IPCE|EQE))?|short.circuit current density",
     "FF": r"FF|fill factor", "EQE": r"EQE|IPCE|external quantum efficiency",
-    "bandgap": r"E[ _]*g|band ?gap", "series resistance": r"R[ _]*s|series resistance",
-    "shunt resistance": r"R[ _]*sh|shunt resistance",
+    "bandgap": r"E[ _]*g|band[ _-]?gap", "series resistance": r"R[ _]*s(?:er)?|series resistance",
+    "shunt resistance": r"R[ _]*sh(?:unt)?|shunt resistance",
 }
 RAG = {
-    "EM": r"EM|exact match(?: score)?", "F1": r"F[ -]?1(?: score)?",
-    "accuracy": r"acc(?:uracy)?\.?", "precision": r"precision", "recall": r"recall",
+    "EM": r"EM|exact match(?: score)?", "F1": r"(?:(?:avg\.?|average|macro|micro|weighted|response)\s+)?F[ -]?1(?:[ -]+score)?",
+    "accuracy": r"acc(?:uracy)?\.?|classification accuracy", "precision": r"precision", "recall": r"recall",
     "MRR": r"MRR|mean reciprocal rank", "MAP": r"MAP|mean average precision",
-    "nDCG": r"nDCG", "hit rate": r"hits?|hit rate", "ROUGE-L": r"ROUGE[- ]L",
-    "BLEU": r"BLEU", "ECE": r"ECE|expected calibration error", "latency": r"latency(?: per query)?",
+    "nDCG": r"nDCG|normalized discounted cumulative gain", "hit rate": r"hits?|hit[ -]rate|hit[ -]ratio", "ROUGE-L": r"ROUGE[ _-]L",
+    "BLEU": r"BLEU", "ECE": r"ECE|expected calibration error", "latency": r"latency(?: per query)?|(?:average |avg\.? |ave\.? )?(?:run[ -]?time|time per query)|"
+               r"(?:ave\.?|avg\.?|average)\s+time|(?:pre|online)[ -]time",
 }
 METRICS = {"solar": SOLAR, "rag": RAG}
 _UNITLESS_RAG_SCORES = {"EM", "F1"}
 UNIT_TAIL = re.compile(r"[\[(]([^()\[\]]+)[\])](?:\s*[↑↓])?\s*$")
+DIRECTION_TAIL = re.compile(r"\s*(?:\(\s*[↑↓]\s*\)|\[\s*[↑↓]\s*\]|[↑↓])\s*$")
+PERCENT_TAIL = re.compile(r"\s+%$")
 SUPPLEMENT = re.compile(r"\b(?:supplement(?:ary|al) (?:material|information|data|table|figure)|supporting information)", re.I)
 PROCEDURE = re.compile(
     r"\b(?:we (?:measure[ds]?|evaluat\w*|test\w*|obtain\w*|report\w*|conduct\w*|assess\w*|"
@@ -77,6 +80,10 @@ FIXED_GENERATOR = re.compile(
     r"\b(?:fixed|same|shared)\s+(?:generator|llm backbone)\b"
     r"|\b(?:generator|llm backbone)(?: model)?\s+(?:is\s+)?(?:held\s+|kept\s+)?fixed\b", re.I,
 )
+HALLUCINATION_DEFINITION = re.compile(r"\bhallucination score\s*\(hs\)\s+evaluates\b", re.I)
+LLM_ACCURACY_DEFINITION = re.compile(r"\baccl\s+is\s+a\s+score\s+assigned\s+by\s+the\s+llm\b", re.I)
+ROLEPLAY_METRICS = {"hallucination score": HALLUCINATION_DEFINITION,
+                    "LLM-judged accuracy score": LLM_ACCURACY_DEFINITION}
 JV = re.compile(r"\b(?:j\s*-\s*v|photocurrent density\s*-\s*photovoltage)\b")
 
 
@@ -132,8 +139,12 @@ def fold(text: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", text).replace("−", "-").replace("–", "-").casefold().split())
 
 
+def _heading(text):
+    return DIRECTION_TAIL.sub("", text).strip()
+
+
 def metric_label(text, domain):
-    text = UNIT_TAIL.sub("", unicodedata.normalize("NFKC", text).strip()).strip()
+    text = PERCENT_TAIL.sub("", UNIT_TAIL.sub("", fold(_heading(text)).replace("\u00ad", ""))).strip()
     for metric, aliases in METRICS[domain].items():
         match = re.fullmatch(rf"(?:{aliases})(?:\s*@\s*(\d+))?", text, re.I)
         if match and (not match[1] or domain == "rag"):
@@ -187,12 +198,17 @@ def _recall_scale_support(table, references, definitions, prose):
 def link_table_context(fragments, pages, domain):
     prose = {}
     definitions = []
+    roleplay_definitions = []
     for page in pages:
         number = page["page"]
         blocks = [Block(f"p{number}-text{i}-0", tuple(b["bbox"]), b["text"])
                   for i, b in enumerate(page["blocks"])]
         prose[number] = blocks
-        definitions.extend(b for b in blocks if domain == "rag" and RECALL_DEFINITION.search(fold(b.text)))
+        if domain == "rag":
+            definitions.extend(b for b in blocks if RECALL_DEFINITION.search(fold(b.text)))
+            roleplay_definitions.extend(b for b in blocks if any(
+                pattern.search(fold(b.text)) for pattern in ROLEPLAY_METRICS.values()
+            ))
     linked = {}
     recall_scales = {}
     for fragment in fragments:
@@ -224,6 +240,8 @@ def link_table_context(fragments, pages, domain):
             if key not in recall_scales:
                 recall_scales[key] = _recall_scale_support(key[1], references, definitions, prose)
             scale_support = recall_scales[key]
+        if domain == "rag" and re.search(r"\brole-playing capabilities\b", _support_caption(fragment), re.I):
+            scale_support = tuple(dict.fromkeys((*scale_support, *roleplay_definitions)))
         yield replace(fragment, blocks=tuple(dict.fromkeys((*fragment.blocks, *references, *scale_support))),
                       table_references=references, metric_scale_support=scale_support)
 
@@ -235,6 +253,11 @@ def _linked_procedure(blocks, table):
     sentences = re.split(r"(?<=[.!?])\s+(?=[a-z])", text)
     if any(set(TABLE_REFERENCE.findall(sentence)) == {table} and LINKED_PROCEDURE.search(sentence)
            for sentence in sentences):
+        return True
+    if set(TABLE_REFERENCE.findall(text)) == {table} and re.search(
+        rf"\btable\s+{re.escape(table)}\s+demonstrates the results of (?:an? |our )?ablation study,? evaluated on\b",
+        text,
+    ):
         return True
     if set(TABLE_REFERENCE.findall(text)) != {table} or not LINKED_PROCEDURE.search(text):
         return False
@@ -256,13 +279,16 @@ def normalize(raw_value, raw_unit, metric, domain):
     if domain == "solar":
         scales = {
             "PCE": {"%": ("%", 1)}, "Voc": {"v": ("V", 1), "mv": ("V", ".001")},
-            "Jsc": {u: ("mA/cm²", 1) for u in ("ma/cm2", "macm-2")},
+            "Jsc": {u: ("mA/cm²", 1) for u in ("ma/cm2", "macm-2", "ma/cm-2")},
             "FF": {"%": ("fraction", ".01"), "fraction": ("fraction", 1), "ratio": ("fraction", 1)},
             "EQE": {"%": ("%", 1)}, "bandgap": {"ev": ("eV", 1)},
-            "series resistance": {"ωcm2": ("Ω cm²", 1), "ω": ("Ω", 1)},
-            "shunt resistance": {"ωcm2": ("Ω cm²", 1), "ω": ("Ω", 1)},
+            "series resistance": {"ωcm2": ("Ω cm²", 1), "ω.cm2": ("Ω cm²", 1), "ω": ("Ω", 1)},
+            "shunt resistance": {"ωcm2": ("Ω cm²", 1), "ω.cm2": ("Ω cm²", 1), "ω": ("Ω", 1)},
         }
     else:
+        if metric in ROLEPLAY_METRICS and not unit and 1 <= value <= 10:
+            # The 1–10 instrument is established by the table caption.
+            return Value(value=str(value))
         scales = {"latency": {"ms": ("ms", 1), "s": ("ms", 1000)}}
         if metric in RAG and metric != "latency":
             if not unit and metric in _UNITLESS_RAG_SCORES and 0 <= value <= 1:
@@ -278,26 +304,38 @@ def normalize(raw_value, raw_unit, metric, domain):
 
 
 def _row_metric_source(cell, domain):
-    if domain == "rag" and cell.row_axis and fold(cell.row_axis.text) == METRIC_AXIS:
+    if domain == "rag" and (cell.metric_on_row or cell.row_axis and fold(cell.row_axis.text) == METRIC_AXIS):
         return cell.row[-1]
     return None
 
 
 def _table_unit(cell, domain):
     heading = _row_metric_source(cell, domain) or (cell.headers[-1] if cell.headers else None)
-    header = UNIT_TAIL.search(heading.text) if heading else None
+    header_text = _heading(heading.text) if heading else ""
+    header = UNIT_TAIL.search(header_text) or PERCENT_TAIL.search(header_text)
+    header_unit = (header[1] if header.re is UNIT_TAIL else "%") if header else ""
     if cell.aggregation == "champion" and (record := RECORD.fullmatch(cell.value.text)):
-        return record[1], header[1] if header else "", None
+        return record[1], header_unit, None
     number = CELL.fullmatch(cell.value.text)
     if number is None:
         raise EvidenceError("unsupported_number")
-    raw_unit = number[3] or (header[1] if header else "")
-    if number[3] and header and _unit_key(number[3]) != _unit_key(header[1]):
+    raw_unit = number[3] or (header_unit)
+    if number[3] and header and _unit_key(number[3]) != _unit_key(header_unit):
         raise EvidenceError("conflicting_units")
     return number[1], raw_unit, number[2]
 
 
-def _table_metric(cell, domain):
+def _table_metric(cell, domain, fragment=None):
+    if domain == "rag" and fragment and cell.headers:
+        label = fold(_heading(cell.headers[-1].text))
+        caption = fold(_support_caption(fragment))
+        if re.search(r"\brole-playing capabilities\b", caption):
+            if (label == "hs" and re.search(r"\bhs\s*\(1-\s*10\)", caption)
+                    and any(HALLUCINATION_DEFINITION.search(fold(b.text)) for b in fragment.metric_scale_support)):
+                return "hallucination score", None
+            if (label == "accl" and re.search(r"\baccl\s*\(1-\s*10\)", caption)
+                    and any(LLM_ACCURACY_DEFINITION.search(fold(b.text)) for b in fragment.metric_scale_support)):
+                return "LLM-judged accuracy score", None
     if source := _row_metric_source(cell, domain):
         # A named column metric or change statistic can alter the meaning of the row label.
         if any(metric_label(b.text, domain) or re.search(r"[Δ∆δ]|\b(?:delta|change|improvement)\b", b.text, re.I)
@@ -305,7 +343,7 @@ def _table_metric(cell, domain):
             return None
         return metric_label(source.text, domain)
     for b in reversed(cell.headers):
-        if not UNIT_ONLY.fullmatch(b.text):
+        if not UNIT_ONLY.fullmatch(_heading(b.text)):
             return metric_label(b.text, domain)
     return None
 
@@ -321,6 +359,8 @@ def _origin(text):
 def _table_origin(cell, fragment):
     caption = _support_caption(fragment)
     row = " ".join(b.text for b in cell.row)
+    if cell.row_axis and cell.row_axis.block_id.endswith("-pv-device"):
+        return "primary", fragment.table_references
     if _origin(row) == "cited":
         return "cited", cell.row
     if fragment.caption_has_reference or re.search(r"\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]", caption + " " + row):
@@ -394,7 +434,7 @@ def _table_context(cell, fragment, domain):
         spectrum = re.search(r"\bAM\s*1\.5\s*G\b", caption, re.I)
         if spectrum:
             result["spectrum"] = spectrum[0]
-        label = _table_metric(cell, domain)
+        label = _table_metric(cell, domain, fragment)
         spectral = any(re.search(r"\b(?:IPCE|EQE)\b", fold(h), re.I) for h in headers)
         if spectral:
             result["measurement_type"] = "EQE"
@@ -418,7 +458,7 @@ def _table_context(cell, fragment, domain):
                                      deposition_method=process[1])
                     layers.append(layer)
                 result.update(layers=layers, device_role="record", device_type="cell")
-            result["note"] = "Figure-caption trace and corresponding prose: " + caption
+            result["note"] = "Figure and corresponding prose: " + caption
         return result
     result = _labelled_context(caption, {
         "rag_variant": r"(?:rag )?(?:method|variant)",
@@ -438,7 +478,7 @@ def _table_context(cell, fragment, domain):
         # The column path locates the value. Its model or method role needs separate evidence.
         return result
     axis = fold(cell.row_axis.text) if cell.row_axis else ""
-    label = _table_metric(cell, domain)
+    label = _table_metric(cell, domain, fragment)
     component = None
     if label and label[0] in {"recall", "precision", "MRR", "MAP", "nDCG", "hit rate"} and (
         axis in {"model type", "model", "method", "encoder", "retriever", "reranker"}
@@ -471,6 +511,19 @@ def _table_context(cell, fragment, domain):
             result.pop("generator_model", None)
     if re.search(r"multi-hop QA", caption, re.I):
         result["task_type"] = "multi-hop QA"
+    if axis in {"nodes", "graph size"}:
+        result.pop("rag_variant", None)
+    role_play = re.search(r"\brole-playing capabilities on ([\w.-]+)", caption, re.I)
+    if role_play and axis == "rag method":
+        if len(cell.headers) == 2 and GENERATOR_HEADER.fullmatch(cell.headers[0].text):
+            result["generator_model"] = cell.headers[0].text
+        if re.search(r"\band\s", caption[role_play.end():], re.I):
+            if len(cell.row) == 2 and re.search(rf"\b{re.escape(cell.row[0].text)}\b", caption, re.I):
+                result["dataset_name"] = cell.row[0].text
+        else:
+            result["dataset_name"] = role_play[1]
+        result["rag_variant"] = row
+
     return result
 
 
@@ -514,7 +567,7 @@ def offline_proposals(fragment, domain):
 
 
 def _table_proposal(cell, fragment, domain):
-    label = _table_metric(cell, domain)
+    label = _table_metric(cell, domain, fragment)
     if label is None:
         row_metric = _row_metric_source(cell, domain)
         leaf = row_metric.text if row_metric else next(
@@ -537,6 +590,8 @@ def _table_proposal(cell, fragment, domain):
 
 def unresolved_table_cells(fragment, domain, digest):
     for cell in fragment.cells:
+        if cell.headers and fold(_heading(cell.headers[-1].text)) in {"wcc", "ave. edges", "nodes", "p |d|"}:
+            continue
         try:
             _table_proposal(cell, fragment, domain)
         except EvidenceError as exc:
@@ -545,7 +600,7 @@ def unresolved_table_cells(fragment, domain, digest):
                    "extraction_status": "needs_review",
                    "source_block_id": cell.value.block_id, "value": _block_ref(cell.value),
                    "row": [_block_ref(b) for b in cell.row], "headers": [_block_ref(b) for b in cell.headers],
-                   **({"row_axis": _block_ref(cell.row_axis)} if _row_metric_source(cell, domain) else {})}
+                   **({"row_axis": _block_ref(cell.row_axis)} if cell.row_axis and _row_metric_source(cell, domain) else {})}
 
 
 def make_prompt(fragment, domain):
@@ -613,6 +668,8 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
     unconfirmed = {}
     context_evidence = {}
     label = metric_label(proposal.metric, domain)
+    if domain == "rag" and proposal.metric in ROLEPLAY_METRICS:
+        label = proposal.metric, None
     if label is None:
         raise EvidenceError("unknown_metric")
     name, k = label
@@ -631,7 +688,7 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
             raise EvidenceError("wrong_table_cell")
         if proposal.row != [b.block_id for b in cell.row] or proposal.headers != [b.block_id for b in cell.headers]:
             raise EvidenceError("wrong_table_cell")
-        if _table_metric(cell, domain) != label:
+        if _table_metric(cell, domain, fragment) != label:
             raise EvidenceError("wrong_table_metric")
         raw, unit, spread = _table_unit(cell, domain)
         if (raw, unit) != (proposal.raw_value, proposal.raw_unit):
@@ -643,7 +700,12 @@ def verify(proposal, fragment, domain, document_id, digest, model_id):
         if fragment.caption:
             geometry.extend(fragment.caption_support or (fragment.caption,))
         geometry.extend(fragment.table_references)
-        metric_source = (row_metric, cell.row_axis) if (row_metric := _row_metric_source(cell, domain)) else cell.headers
+        row_metric = _row_metric_source(cell, domain)
+        metric_source = tuple(filter(None, (row_metric, cell.row_axis))) if row_metric else cell.headers
+        if name in ROLEPLAY_METRICS:
+            definitions = tuple(b for b in fragment.metric_scale_support if ROLEPLAY_METRICS[name].search(fold(b.text)))
+            metric_source = (*metric_source, *(fragment.caption_support or ()), *definitions)
+            geometry.extend(definitions)
         context_evidence["metric"] = [_block_ref(b) for b in metric_source]
         if domain == "solar" and name == "PCE" and any(
             fold(UNIT_TAIL.sub("", b.text)) == "efficiency" for b in cell.headers

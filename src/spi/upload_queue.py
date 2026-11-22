@@ -76,20 +76,26 @@ class UploadQueue:
             db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield self._get(db, upload_id)
 
-    def enqueue(self, upload: StoredUpload) -> UploadJob:
+    def enqueue(self, upload: StoredUpload, *, can_reanalyze=None, max_queued=None) -> UploadJob:
         if upload.owner_user_id != self.owner_user_id:
             raise ValueError("Upload owner does not match the queue")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, upload.upload_id)
             if current and not current.processing.retry_allowed:
-                return current
+                if (can_reanalyze is None or current.processing.status not in {"completed", "needs_review"}
+                        or not can_reanalyze(current.processing.mode)):
+                    return current
             if current and not current.matches(upload):
                 raise ValueError("Upload identity does not match its existing job")
             retries = current.retries + 1 if current else 0
             if self.quota and (retries > self.quota.max_retries or
                     db.execute("SELECT count(*) FROM jobs WHERE status = 'queued'").fetchone()[0]
                     >= self.quota.max_queued_jobs):
+                raise UploadQuotaFull
+            if max_queued is not None and db.execute(
+                "SELECT count(*) FROM jobs WHERE status = 'queued'"
+            ).fetchone()[0] >= max_queued:
                 raise UploadQuotaFull
             job = UploadJob(domain=upload.domain, sha256=upload.sha256, owner_user_id=self.owner_user_id,
                             model_request_budget=self.job_budget, retries=retries, processing=UploadProcessing(

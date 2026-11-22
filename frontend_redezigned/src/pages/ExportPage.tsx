@@ -42,6 +42,7 @@ function Downloads() {
 
   return (
     <div className="stack export-layout">
+      {pending && <p className="download-status" role="status"><span className="feedback-spinner" aria-hidden="true" />Загрузка {pending}…</p>}
       {feedback && (
         <div
           className={`download-status ${feedback.error ? 'error' : 'good'}`}
@@ -53,9 +54,9 @@ function Downloads() {
       <div className="split export-grid">
         <section className="surface export-panel">
           <div className="panel-intro">
-            <h2>Файлы CSV</h2>
+            <h2><Icon name="grid" size={19} />Файлы CSV</h2>
             <p className="muted">
-              CSV формируется отдельным экспортёром для Solar и RAG.
+              Таблицы для анализа данных Solar и RAG.
             </p>
           </div>
           {!provider.csvAvailable && (
@@ -63,13 +64,16 @@ function Downloads() {
               Подключенные файлы CSV появятся после публикации выгрузки.
             </Note>
           )}
-          {provider.csvAvailable && <ul className="file-list">
-            {profiles.flatMap((profile) => csvFiles[profile].map((name) => {
+          {provider.csvAvailable && profiles.map((profile) => (
+            <div className="export-files" key={profile}>
+              <h3>{profile === 'solar' ? 'Solar' : 'RAG'}</h3>
+              <ul className="file-list">
+                {csvFiles[profile].map((name) => {
               const source = `${name}.csv`;
               const filename = `${profile}-${source}`;
               return (
                 <li key={filename}>
-                  <span className="file-name">{profile === 'solar' ? 'Solar' : 'RAG'} · {source}</span>
+                  <span className="file-name"><Icon name="file" size={15} />{source}</span>
                   <button
                     className="button"
                     type="button"
@@ -82,12 +86,14 @@ function Downloads() {
                   </button>
                 </li>
               );
-            }))}
-          </ul>}
+                })}
+              </ul>
+            </div>
+          ))}
         </section>
         <section className="surface export-panel">
           <div className="panel-intro">
-            <h2>Паспорт и отчёты</h2>
+            <h2><Icon name="file" size={19} />Паспорт и отчёты</h2>
             <p className="muted">Поля, связи, размерности и правила проверки данных.</p>
           </div>
           <button
@@ -105,7 +111,7 @@ function Downloads() {
             Скачать паспорт данных
           </button>
           <hr />
-          <p className="muted export-subhead">Архивный JSON</p>
+          <h3 className="export-subhead">Архивный JSON</h3>
           <p className="muted">Сохранённые файлы сервера могут отличаться от текущего списка результатов.</p>
           <div className="button-row">
             {(['results.json', 'issues.json'] as const).map((name) => (

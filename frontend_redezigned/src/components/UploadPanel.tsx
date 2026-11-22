@@ -10,7 +10,7 @@ import { Feedback, LoadBoundary } from './Feedback';
 import { PdfPane } from './PdfPane';
 import { UploadProcessingControls } from './UploadProcessing';
 
-export type UploadCredentials = { token: string; setToken?: (token: string) => void };
+export type UploadCredentials = { token: string; setToken?: (token: string) => void; expired?: boolean };
 const date = new Intl.DateTimeFormat('ru', { dateStyle: 'medium', timeStyle: 'medium' });
 const sizeNumber = new Intl.NumberFormat('ru', { maximumFractionDigits: 2 });
 
@@ -20,8 +20,9 @@ function fileSize(bytes: number) {
     : `${sizeNumber.format(bytes)} Б`;
 }
 
-function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
+function AuthorizedUploads({ api, token, initial, maxBytes, lock, refreshAccess }: {
   api: UploadClient; token: string; initial: StoredUpload[]; maxBytes: number; lock?: () => void;
+  refreshAccess: () => void;
 }) {
   const [records, setRecords] = useState(initial);
   const [listRevision, setListRevision] = useState(0);
@@ -76,7 +77,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
       if (access.kind === 'authorized') {
         setRecords(access.records);
         setListRevision((value) => value + 1);
-      } else lock?.();
+      } else refreshAccess();
     });
   }
 
@@ -101,7 +102,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
             <option value="rag">RAG</option>
           </select>
         </label>
-        <button className="button" disabled={!file || !domain || Boolean(busy) || invalidFile}>
+        <button className="button primary" disabled={!file || !domain || Boolean(busy) || invalidFile}>
           {busy === 'upload' ? 'Отправляем PDF…' : 'Загрузить PDF'}
         </button>
       </form>
@@ -116,7 +117,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
         </button>
         {lock && <button className="button quiet" type="button" onClick={lock} disabled={Boolean(busy)}>Выйти</button>}
       </div>
-      {records.length === 0 ? <p className="muted">Сохранённых PDF пока нет.</p> : (
+      {records.length === 0 ? <p className="muted">Сохранённых PDF пока нет. Выберите файл и направление анализа.</p> : (
         <ul className="upload-list" aria-label="Сохранённые PDF">
           {records.map((record) => (
             <li key={record.upload_id}>
@@ -127,7 +128,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
                   {' · '}<time dateTime={record.created_at}>{date.format(new Date(record.created_at))}</time>
                 </p>
               </div>
-              <Badge>{record.status}</Badge>
+              <Badge>PDF сохранён</Badge>
               <button className="button" type="button" aria-label={`Открыть оригинал ${record.original_filename}`}
                 onClick={() => setView(record)}>Открыть оригинал</button>
               <UploadProcessingControls api={api} id={record.upload_id} token={token} listRevision={listRevision} />
@@ -146,28 +147,33 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
   );
 }
 
-export function PrivateUploadAccess({ api, token, setToken, children }: UploadCredentials & {
-  api: UploadClient; children: (records: StoredUpload[], maxBytes: number) => ReactNode;
+export function PrivateUploadAccess({ api, token, setToken, expired, children }: UploadCredentials & {
+  api: UploadClient; children: (records: StoredUpload[], maxBytes: number, retry: () => void) => ReactNode;
 }) {
   const load = useCallback((signal: AbortSignal) => api.list(token, signal), [api, token]);
   const access = useData(load);
   const tokenInput = useRef<HTMLInputElement>(null);
 
+  if (access.state.kind === 'loading') {
+    return <Feedback kind="loading" title={token ? 'Проверяем токен доступа…' : 'Проверяем доступ к загрузкам…'} />;
+  }
   return (
     <LoadBoundary {...access}>
       {(result) => {
-        if (result.kind === 'unavailable') return <p className="muted" role="status">{result.message}</p>;
+        if (result.kind === 'unavailable') return <Feedback kind="error" title={result.message} retry={access.retry} />;
         if (result.kind === 'authorized') {
-          return children(result.records, result.maxBytes);
+          return children(result.records, result.maxBytes, access.retry);
         }
         if (!setToken) return <Feedback kind="error" title="Войдите, чтобы продолжить" />;
         return (
           <>
             {result.rejected && <p role="alert">Неверный токен доступа.</p>}
+            {expired && <p role="alert">Доступ к загрузкам истёк. Введите действующий токен.</p>}
             <form className="upload-form" autoComplete="off" onSubmit={(event) => {
               event.preventDefault();
               const value = tokenInput.current?.value.trim();
               if (!value) return;
+              if (tokenInput.current) tokenInput.current.value = '';
               if (value === token) access.retry();
               else setToken(value);
             }}>
@@ -184,15 +190,16 @@ export function PrivateUploadAccess({ api, token, setToken, children }: UploadCr
   );
 }
 
-export function UploadPanel({ token, setToken }: UploadCredentials) {
+export function UploadPanel(credentials: UploadCredentials) {
   const api = useUploadClient();
+  const { token, setToken } = credentials;
   return (
     <section className="surface upload-panel" aria-labelledby="uploads-heading">
       <header className="section-bar"><h2 id="uploads-heading">Мои загрузки</h2></header>
       <div className="upload-content">
-        {api ? <PrivateUploadAccess api={api} token={token} setToken={setToken}>
-          {(records, maxBytes) => <AuthorizedUploads api={api} token={token}
-            initial={records} maxBytes={maxBytes} lock={setToken ? () => setToken('') : undefined} />}
+        {api ? <PrivateUploadAccess api={api} {...credentials}>
+          {(records, maxBytes, retry) => <AuthorizedUploads api={api} token={token}
+            initial={records} maxBytes={maxBytes} refreshAccess={retry} lock={setToken ? () => setToken('') : undefined} />}
         </PrivateUploadAccess> : (
           <Feedback kind="empty" title="Загрузка PDF отключена в демонстрационном режиме" />
         )}

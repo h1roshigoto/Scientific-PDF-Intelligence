@@ -330,9 +330,9 @@ def test_retry_serializes_with_review_and_invalidates_even_identical_source(priv
         assert release.wait(timeout=10)
         return decide(self, *args)
 
-    def observe_enqueue(self, *args):
+    def observe_enqueue(self, *args, **kwargs):
         enqueue_entered.set()
-        return enqueue(self, *args)
+        return enqueue(self, *args, **kwargs)
 
     monkeypatch.setattr(UploadReviews, "_decide", wait_before_append)
     monkeypatch.setattr(UploadQueue, "enqueue", observe_enqueue)

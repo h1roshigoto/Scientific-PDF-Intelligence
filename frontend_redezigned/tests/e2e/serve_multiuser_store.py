@@ -7,31 +7,10 @@ from pathlib import Path
 from secrets import token_urlsafe
 from tempfile import TemporaryDirectory
 
-import pymupdf
 import uvicorn
 from fastapi.responses import FileResponse
 
-from serve_test_store import processing_fixture, seed
-
-
-def rag_fixture(path):
-    leaves = (130, 175, 220, 265, 310, 355, 400, 445)
-    with pymupdf.open() as pdf:
-        page = pdf.new_page()
-        page.insert_text((45, 50), "Table 1: We compare generators across QA datasets; retriever: Qwen-Embed")
-        rows = [
-            (66, "", [(197.5, "Gemini-2.5 Flash"), (377.5, "Mistral v3-8B Instruct")]),
-            (79, "", zip((152.5, 242.5, 332.5, 422.5), ("AtlasQA", "DeltaQA") * 2)),
-            (92, "Method", zip(leaves, ("EM", "F1") * 4)),
-            (108, "GPT-4o mini", zip(leaves, (f".{100 + i}" for i in range(8)))),
-            (123, "Graph RAG", zip(leaves, (f".{200 + i}" for i in range(8)))),
-        ]
-        for y, label, columns in rows:
-            if label:
-                page.insert_text((45, y), label)
-            for x, value in columns:
-                page.insert_text((x - pymupdf.get_text_length(value) / 2, y), value)
-        pdf.save(path)
+from serve_test_store import processing_fixture, rag_fixture, seed
 
 
 def make_invitations():
@@ -81,3 +60,4 @@ if __name__ == "__main__":
                 uvicorn.run(app, host="127.0.0.1", port=8183, proxy_headers=False)
             finally:
                 worker.terminate()
+                worker.wait()
