@@ -126,12 +126,14 @@ const processingSchema = z.object({
   step: processingStep.nullable(),
   updated_at: z.iso.datetime({ offset: true }).nullable(),
   diagnostic: z.string().nullable(),
-  retry_allowed: z.boolean(),
+  retry_allowed: z.boolean(), reanalysis_available: z.boolean().default(false),
   mode: z.enum(['local', 'gigachat']).nullable(),
   coverage: z.string().nullable(),
   counts: z.object({
     pages: count, pages_analyzed: count, results: count, needs_review: count,
     issues: count, unresolved: count, pending_fragments: count,
+    tables_detected: count.default(0), tables_parsed: count.default(0),
+    tables_needing_review: count.default(0), tables_outside_scope: count.default(0),
   }).nullable(),
   pages_needing_ocr: z.array(z.number().int().positive()),
   human_review_required: z.boolean(),
@@ -221,7 +223,8 @@ const uploadDetails = {
 };
 
 export type UploadAuth = { mode: 'private'; onUnauthorized?: (token: string) => void }
-  | { mode: 'multiuser'; sessionId: string; onUnauthorized: () => void };
+  | { mode: 'multiuser'; sessionId: string; onUnauthorized: () => void }
+  | { mode: 'demo-access' };
 
 export function createUploadClient(fetcher = fetch, auth: UploadAuth = { mode: 'private' }) {
   const endpoint = '/api/uploads';
@@ -239,13 +242,14 @@ export function createUploadClient(fetcher = fetch, auth: UploadAuth = { mode: '
     ? sessionFetcher(fetcher, auth.sessionId, auth.onUnauthorized)
     : privateFetch, 120_000, {
     ...accountStatuses,
-    401: auth.mode === 'private' ? 'Неверный токен доступа.' : 'Войдите, чтобы продолжить.',
+    401: auth.mode === 'private' ? 'Неверный токен доступа.' : auth.mode === 'demo-access'
+      ? 'Обновите страницу, чтобы восстановить доступ через Cloudflare.' : 'Войдите, чтобы продолжить.',
     503: 'Приватная загрузка сейчас недоступна.',
   }, { ...accountDetails, ...uploadDetails });
   const privateRequest = (token: string): RequestInit => auth.mode === 'private'
     ? { cache: 'no-store', credentials: 'omit', redirect: 'error',
       headers: /^[A-Za-z0-9._~+/-]+={0,2}$/.test(token) ? { Authorization: `Bearer ${token}` } : {} }
-    : sessionInit;
+    : auth.mode === 'demo-access' ? { ...sessionInit, headers: { 'X-SPI-Demo-CSRF': '1' } } : sessionInit;
   const uploadEndpoint = (id: string, action: string) => `${endpoint}/${encodeURIComponent(id)}/${action}`;
   const reviewEndpoint = (id: string, result: string) => uploadEndpoint(id, `results/${encodeURIComponent(result)}/review`);
 
@@ -407,7 +411,7 @@ export function createAccountClient(sessionId?: string, onUnauthorized?: () => v
     method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' },
   });
   return {
-    config: (signal: AbortSignal) => http.json('/api/auth/config', z.object({ mode: z.enum(['private', 'multiuser']) }), signal),
+    config: (signal: AbortSignal) => http.json('/api/auth/config', z.object({ mode: z.enum(['private', 'multiuser', 'demo-access']) }), signal),
     me: (signal: AbortSignal) => http.json('/api/auth/me', sessionSchema, signal),
     login: (email: string, password: string, signal: AbortSignal) =>
       http.json('/api/auth/login', sessionSchema, signal, jsonPost({ email, password })),

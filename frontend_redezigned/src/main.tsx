@@ -21,15 +21,15 @@ import { UploadAnalysisPage } from './pages/UploadAnalysisPage';
 import { provider, UploadClientContext } from './provider';
 import './styles/index.css';
 
-function PrivateApp() {
+function PrivateApp({ demoAccess = false }: { demoAccess?: boolean }) {
   const url = useLocation();
   const [access, setAccess] = useState({ token: '', expired: false });
   const setToken = useCallback((token: string) => setAccess({ token, expired: false }), []);
-  const uploads = useMemo(() => provider.mode === 'api' ? createUploadClient(fetch, {
+  const uploads = useMemo(() => provider.mode === 'api' ? createUploadClient(fetch, demoAccess ? { mode: 'demo-access' } : {
     mode: 'private', onUnauthorized: (token) => {
       setAccess((current) => current.token === token ? { token: '', expired: true } : current);
     },
-  }) : undefined, []);
+  }) : undefined, [demoAccess]);
   const previousPath = useRef(url.pathname);
 
   useEffect(() => {
@@ -43,7 +43,7 @@ function PrivateApp() {
 
   const filters = getFilters(url.searchParams);
   const selected = url.searchParams.get('selected');
-  const credentials = { ...access, setToken };
+  const credentials = { ...access, setToken: demoAccess ? undefined : setToken };
 
   let content;
   if (route.view === 'not-found') {
@@ -198,7 +198,7 @@ function MultiuserApp() {
 
 function ConfiguredApp() {
   const config = useData(accountApi.config);
-  return <LoadBoundary {...config}>{({ mode }) => mode === 'multiuser' ? <MultiuserApp /> : <PrivateApp />}</LoadBoundary>;
+  return <LoadBoundary {...config}>{({ mode }) => mode === 'multiuser' ? <MultiuserApp /> : <PrivateApp demoAccess={mode === 'demo-access'} />}</LoadBoundary>;
 }
 
 function App() {

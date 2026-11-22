@@ -7,11 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from .auth_api import SecurityMiddleware, install_auth
 from .auth_config import AuthConfig, auth_mode, flag
+from .demo_access import DemoAccess, require_demo_access
 from .config import load_project_env
 from .project_passport import (
     AmbiguousPublication, PublicationNotFound, passport_filename, render_project_passport,
@@ -126,6 +127,11 @@ def create_app():
                   redirect_slashes=not multiuser)
     app.add_api_route("/health", health, methods=["GET"])
     app.include_router(upload_router)
+    demo_access = flag("SPI_DEMO_ACCESS")
+    if demo_access:
+        if multiuser or flag("SPI_DEPLOYMENT"):
+            raise ValueError("Cloudflare demo Access requires the local private demo")
+        app.state.demo_access = DemoAccess()
     if multiuser:
         config = AuthConfig.from_env()
         install_auth(app, config)
@@ -156,9 +162,9 @@ def create_app():
 
             app.add_middleware(RequestMetrics)
     else:
-        app.include_router(official_router)
+        app.include_router(official_router, dependencies=[Depends(require_demo_access)] if demo_access else [])
         app.add_api_route("/auth/config", lambda: JSONResponse(
-            {"mode": "private"}, headers={"Cache-Control": "no-store"}), methods=["GET"])
+            {"mode": "demo-access" if demo_access else "private"}, headers={"Cache-Control": "no-store"}), methods=["GET"])
         origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
         if origins:
             app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"],

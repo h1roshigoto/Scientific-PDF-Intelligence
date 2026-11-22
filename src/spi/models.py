@@ -37,6 +37,10 @@ class ProcessingCounts(BaseModel):
     issues: int
     unresolved: int
     pending_fragments: int
+    tables_detected: int = 0
+    tables_parsed: int = 0
+    tables_needing_review: int = 0
+    tables_outside_scope: int = 0
 
 
 class ProcessingPage(BaseModel):
@@ -54,6 +58,7 @@ class UploadProcessing(BaseModel):
     updated_at: datetime | None = None
     diagnostic: str | None = None
     retry_allowed: bool = False
+    reanalysis_available: bool = False
     mode: Literal["local", "gigachat"] | None = None
     coverage: str | None = None
     counts: ProcessingCounts | None = None

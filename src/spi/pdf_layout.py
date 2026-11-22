@@ -6,8 +6,8 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 from . import pdf_boundary
-from .batch_evidence import relevant
-from .batch_pdf import Fragment, page_fragments
+from .batch_evidence import metric_label, relevant
+from .batch_pdf import Fragment, page_fragments, photovoltaic_claims
 from .pdf import parse_pdf
 
 Box = tuple[FiniteFloat, FiniteFloat, FiniteFloat, FiniteFloat]
@@ -32,7 +32,7 @@ class _Page(_LayoutModel):
 
 
 class _Issue(_LayoutModel):
-    reason: Literal["table_layout_unresolved"]
+    reason: Literal["table_layout_unresolved", "table_outside_metric_scope"]
     page: Annotated[int, Field(strict=True, ge=1, le=pdf_boundary.MAX_PAGES)]
     location: str
     quote: str
@@ -49,14 +49,18 @@ class _Layout(_LayoutModel):
 def read_layout(path, domain, content=None):
     fragments, issues = [], []
     previous_captions = {}
+    solar_lines = {}
 
     def inspect_page(page, blocks):
         units, unresolved = page_fragments(page, blocks, lambda text: relevant(text, domain),
-                                           previous_captions=previous_captions, row_metrics=domain == "rag")
+                                           previous_captions=previous_captions, row_metrics=domain == "rag",
+                                           metric_label=lambda text: metric_label(text, domain),
+                                           solar_lines=solar_lines if domain == "solar" else None)
         fragments.extend(units)
         issues.extend(unresolved)
 
     metadata, pages = parse_pdf(path, domain, content=content, inspect_page=inspect_page)
+    fragments.extend(photovoltaic_claims(solar_lines))
     return metadata, pages, fragments, issues
 
 

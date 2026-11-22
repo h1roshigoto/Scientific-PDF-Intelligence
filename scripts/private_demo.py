@@ -4,6 +4,8 @@ import argparse
 import getpass
 import os
 import re
+import secrets
+import ssl
 import shutil
 import subprocess
 import sys
@@ -53,6 +55,8 @@ def main() -> int:
     parser.add_argument("--data-dir", type=Path, default=app_data / "ScientificPDFIntelligence" / "demo-upload")
     parser.add_argument("--port", type=int, default=5173, help="Site port (default: 5173)")
     parser.add_argument("--api-port", type=int, default=8000, help="FastAPI port (default: 8000)")
+    parser.add_argument("--cloudflare-access", action="store_true", help="Require a signed Cloudflare Access user session")
+    parser.add_argument("--gigachat", action="store_true", help="Opt into model enrichment of selected PDF text")
     args = parser.parse_args()
     if args.port == args.api_port or not all(1 <= port <= 65535 for port in (args.port, args.api_port)):
         parser.error("Choose two different ports between 1 and 65535.")
@@ -64,7 +68,25 @@ def main() -> int:
     if node is None or not vite.is_file() or not (FRONTEND / "dist" / "index.html").is_file():
         parser.error("Install frontend dependencies and run pnpm build first.")
 
-    token = os.getenv("SPI_UPLOAD_TOKEN") or getpass.getpass("Private demo token (at least 32 URL-safe characters): ")
+    if args.cloudflare_access:
+        os.environ["SPI_DEMO_ACCESS"] = "true"
+        try:
+            from spi.demo_access import DemoAccess
+
+            access = DemoAccess()
+        except (ImportError, ValueError) as exc:
+            parser.error(f"Configure Cloudflare Access and install the demo-access extra ({type(exc).__name__}).")
+    use_model = args.gigachat
+    if use_model:
+        bundle = os.getenv("GIGACHAT_CA_BUNDLE_FILE")
+        try:
+            if not os.getenv("GIGACHAT_CREDENTIALS", "").strip() or not bundle:
+                raise ValueError
+            ssl.create_default_context(cafile=bundle)
+        except (OSError, ValueError):
+            print("GigaChat credentials or trusted CA bundle unavailable. Starting local analysis.", file=sys.stderr)
+            use_model = False
+    token = secrets.token_urlsafe(32) if args.cloudflare_access else os.getenv("SPI_UPLOAD_TOKEN") or getpass.getpass("Private demo token (at least 32 URL-safe characters): ")
     if len(token) < 32 or not re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token):
         parser.error("Provide a token with at least 32 URL-safe characters.")
 
@@ -74,10 +96,14 @@ def main() -> int:
                        SPI_STATE_DIR=str(data / "registry"), SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN=token,
                        SPI_UPLOAD_DIR=str(data / "pdfs"), SPI_UPLOAD_STATE_DIR=str(data / "metadata"),
                        SPI_UPLOAD_PROCESS_STATE_DIR=str(data / "processing"), SPI_UPLOAD_MAX_BYTES="26214400",
-                       SPI_UPLOAD_MAX_FILES="100", SPI_UPLOAD_PROCESS_GIGACHAT="false",
+                       SPI_UPLOAD_MAX_FILES="100", SPI_UPLOAD_PROCESS_GIGACHAT=str(use_model).lower(),
+                       SPI_DEMO_ACCESS=str(args.cloudflare_access).lower(), SPI_DEMO_MODEL_FALLBACK="true",
                        SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS="8")
     frontend_env = dict(os.environ, SPI_BACKEND_URL=backend)
-    frontend_env.pop("SPI_UPLOAD_TOKEN", None)
+    for key in ("SPI_UPLOAD_TOKEN", "GIGACHAT_CREDENTIALS"):
+        frontend_env.pop(key, None)
+    if args.cloudflare_access:
+        frontend_env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] = access.host
     services = (
         ("FastAPI", [sys.executable, "-m", "uvicorn", "spi.api:app", "--host", HOST, "--port", str(args.api_port)],
          ROOT, backend_env),

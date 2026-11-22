@@ -23,6 +23,7 @@ const diagnostics: Record<string, string> = {
   original_sha256_mismatch: 'Контрольная сумма оригинала PDF не совпадает.',
   upload_identity_mismatch: 'Данные задания не совпадают с каталогом загрузок.',
   model_credentials_missing_local: 'GigaChat не настроен. Использован локальный анализ.',
+  model_enrichment_incomplete: 'Дополнительный анализ GigaChat прерван. Локальные результаты сохранены.',
   model_unavailable_for_recovery: 'GigaChat недоступен для продолжения прерванного анализа.',
   request_budget_exhausted: 'Исчерпан лимит запросов к GigaChat. Повтор продолжит анализ с сохранённого этапа.',
   'completion:model_request_quota_full': 'Исчерпан суточный лимит запросов к модели. Лимит обновится в полночь UTC.',
@@ -47,9 +48,11 @@ export function UploadStatus({ state }: { state: UploadProcessing }) {
       {diagnostic && <p>{Object.hasOwn(diagnostics, diagnostic) ? diagnostics[diagnostic] : `Диагностика — ${diagnostic}`}</p>}
       {counts && <p className="muted">Обработано страниц — {counts.pages_analyzed} из {counts.pages}
         {' · '}Результатов — {counts.results}{' · '}Замечаний — {counts.issues}</p>}
-      {counts && counts.unresolved > 0 && <p>Нерешённых фрагментов или страниц — {counts.unresolved}</p>}
+      {counts && counts.tables_detected > 0 && <p>Обнаружено таблиц — {counts.tables_detected}
+        {' · '}Размечено — {counts.tables_parsed}{' · '}Требуют проверки — {counts.tables_needing_review}
+        {counts.tables_outside_scope > 0 && ' · Вне выбранных метрик — ' + counts.tables_outside_scope}</p>}
       {counts && counts.pending_fragments > 0 && <p>Ожидают обработки фрагменты — {counts.pending_fragments}</p>}
-      {ocr.length > 0 && <p>Ожидают OCR страницы — {ocr.join(', ')}</p>}
+      {ocr.length > 0 && <p>Требуется OCR для страниц {ocr.join(', ')}. В этом режиме OCR не выполняется.</p>}
     </div>
   );
 }
@@ -149,6 +152,7 @@ export function UploadProcessingControls({ api, id, token, listRevision }: {
   const { state, accepted, pending, pollError, submitError, refresh, enqueue } = useUploadProcessing(api, id, token, listRevision);
   const start = state?.status === 'not_started';
   const retry = state?.status === 'failed' && state.retry_allowed;
+  const reanalyze = state?.reanalysis_available;
   const canOpen = state?.counts && !processingActive(state.status);
   return (
     <div className="upload-analysis-controls">
@@ -156,10 +160,10 @@ export function UploadProcessingControls({ api, id, token, listRevision }: {
         {accepted ? labels[accepted] : 'Проверяем состояние анализа…'}
       </p>}
       {pollError && <p role="alert">Не удалось обновить состояние. {pollError}</p>}
-      {(start || retry || !state) && submitError && <p role="alert">Не удалось подтвердить запуск. {submitError}</p>}
+      {(start || retry || reanalyze || !state) && submitError && <p role="alert">Не удалось подтвердить запуск. {submitError}</p>}
       <div className="upload-actions">
-        {(pending || start || retry) && <button className="button primary" type="button" disabled={pending || Boolean(pollError)}
-          onClick={() => void enqueue()}>{pending ? 'Запускаем анализ…' : retry ? 'Повторить' : 'Начать анализ'}</button>}
+        {(pending || start || retry || reanalyze) && <button className="button primary" type="button" disabled={pending || Boolean(pollError)}
+          onClick={() => void enqueue()}>{pending ? 'Запускаем анализ…' : retry ? 'Повторить' : reanalyze ? 'Повторить обновлённым анализом' : 'Начать анализ'}</button>}
         {canOpen && <Link className="button primary" href={uploadAnalysisUrl(id)}>Посмотреть результаты</Link>}
         {pollError && <button className="button quiet" type="button" onClick={refresh}>Обновить состояние</button>}
       </div>
