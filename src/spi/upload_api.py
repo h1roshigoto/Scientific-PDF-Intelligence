@@ -86,12 +86,16 @@ def _authorized_store(
         return
     if os.getenv("SPI_UPLOAD_ENABLED", "").strip().lower() not in {"1", "true"}:
         raise _error(503, "uploads_disabled")
-    try:
-        token = upload_token()
-    except ValueError as exc:
-        raise _error(503, "uploads_misconfigured") from exc
-    if credentials is None or not compare_digest(credentials.credentials.encode(), token.encode()):
-        raise _error(401, "upload_unauthorized")
+    access = getattr(request.app.state, "demo_access", None)
+    if access:
+        access.authorize(request)
+    else:
+        try:
+            token = upload_token()
+        except ValueError as exc:
+            raise _error(503, "uploads_misconfigured") from exc
+        if credentials is None or not compare_digest(credentials.credentials.encode(), token.encode()):
+            raise _error(401, "upload_unauthorized")
     try:
         uploads = UploadStore.from_env()
     except (OSError, RuntimeError, ValueError) as exc:
@@ -253,7 +257,9 @@ def _queue(uploads: UploadStore, request: Request | None = None) -> UploadQueue:
 def process_upload(upload_id: UploadId, request: Request, response: Response, uploads: PrivateStore) -> UploadJobAccepted:
     upload = _get_upload(upload_id, uploads)
     try:
-        state = _queue(uploads, request).enqueue(upload).processing
+        queue = _queue(uploads, request)
+        state = queue.enqueue(upload, can_reanalyze=UploadProcessingStore(queue.root, upload).needs_reanalysis,
+                              max_queued=4 if getattr(request.app.state, "demo_access", None) else None).processing
     except UploadQuotaFull as exc:
         raise _error(409, "processing_quota_full") from exc
     except STORAGE_ERRORS as exc:
@@ -264,9 +270,14 @@ def process_upload(upload_id: UploadId, request: Request, response: Response, up
 
 @router.get("/{upload_id}/processing", response_model=UploadProcessing)
 def upload_processing(upload_id: UploadId, response: Response, uploads: PrivateStore) -> UploadProcessing:
-    _get_upload(upload_id, uploads)
+    upload = _get_upload(upload_id, uploads)
     try:
-        job = _queue(uploads).get(upload_id)
+        queue = _queue(uploads)
+        job = queue.get(upload_id)
+        if job and job.processing.status in {"completed", "needs_review"}:
+            job.processing.reanalysis_available = UploadProcessingStore(queue.root, upload).needs_reanalysis(
+                job.processing.mode
+            )
     except STORAGE_ERRORS as exc:
         raise _error(500, "upload_processing_storage_error") from exc
     response.headers.update(NO_STORE)

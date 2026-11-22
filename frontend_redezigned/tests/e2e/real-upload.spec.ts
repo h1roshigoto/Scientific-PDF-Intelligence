@@ -428,3 +428,25 @@ test('reviews and exports real local extraction, keeps history after sign-in, an
   expect(await (await request.get(`${base}/file`, { headers })).body()).toEqual(pdf);
   expect(await Promise.all(officialEndpoints.map(async (url) => (await request.get(url)).json()))).toEqual(official);
 });
+
+test('uses the Cloudflare demo session without submitting a private token', async ({ page, request }) => {
+  const pdf = await syntheticPdf(request, 'solar');
+  await page.route('**/api/auth/config', (route) => route.fulfill({ json: { mode: 'demo-access' } }));
+  await page.route('**/api/uploads', async (route) => {
+    const browserHeaders = await route.request().allHeaders();
+    expect(browserHeaders.authorization).toBeUndefined();
+    if (route.request().method() === 'POST') expect(browserHeaders['x-spi-demo-csrf']).toBe('1');
+    // Test the browser against the existing real-upload server in the Edge suite.
+    await route.continue({ headers: { ...browserHeaders, authorization: headers.Authorization } });
+  });
+  await page.goto('/');
+  await page.getByRole('link', { name: 'Загрузить PDF' }).click();
+  const scope = panel(page);
+  await expect(scope.getByLabel('Токен доступа')).toHaveCount(0);
+  await scope.getByLabel('Файл PDF').setInputFiles({
+    name: 'EdgeSession.pdf', mimeType: 'application/pdf', buffer: pdf,
+  });
+  await scope.getByLabel('Направление').selectOption('solar');
+  await scope.getByRole('button', { name: 'Загрузить PDF', exact: true }).click();
+  await expect(scope.getByRole('status')).toHaveText(savedMessage);
+});

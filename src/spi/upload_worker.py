@@ -88,12 +88,24 @@ def _finish(queue, job, store):
     ocr = record["pages_needing_ocr"]
     pending = record["pending_units"]
     needs_review = sum(row.extraction_status == "needs_review" for row in results)
+    table_fragments = {(f["page"], f["location"]) for f in record["fragments"].values()
+                       if (f.get("location") or "").lower().startswith("table")}
+    outside = {(p["page"], p["location"]) for p in record["layout_issues"]
+               if p["reason"] == "table_outside_metric_scope"}
+    review = {(p["page"], p["location"]) for p in record["layout_issues"]
+              if p["reason"] == "table_layout_unresolved"}
+    review.update((f["page"], f["location"]) for f in record["fragments"].values()
+                  if f["status"] == "review" and (f.get("location") or "").lower().startswith("table"))
     counts = ProcessingCounts(
-        pages=len(pages), pages_analyzed=sum(p.read_status in {"text", "empty"} and not p.analysis_failed for p in pages),
+        pages=len(pages), pages_analyzed=sum(p.read_status == "text" and not p.analysis_failed for p in pages),
         results=len(results), needs_review=needs_review, issues=len(issues), unresolved=unresolved,
-        pending_fragments=pending,
+        pending_fragments=pending, tables_detected=len(table_fragments | review | outside),
+        tables_parsed=len(table_fragments), tables_needing_review=len(review),
+        tables_outside_scope=len(outside),
     )
     diagnostic = job.processing.diagnostic
+    if any(f.get("model_fallback") for f in record["fragments"].values()):
+        diagnostic = "model_enrichment_incomplete"
     if record["retry_parse"]:
         failure = "page_analysis_failed"
     elif record["errors"]:
@@ -104,7 +116,7 @@ def _finish(queue, job, store):
     else:
         failure = None
 
-    status = "failed" if failure else "needs_review" if ocr or needs_review or issues else "completed"
+    status = "failed" if failure else "needs_review" if ocr or needs_review or not results or any(i.severity != "info" for i in issues) else "completed"
     queue.update(
         job, status=status, step="finished", diagnostic=failure or diagnostic, retry_allowed=bool(failure),
         coverage=record["extraction_coverage"], counts=counts, pages_needing_ocr=ocr, pages=pages,
@@ -160,13 +172,18 @@ class UploadWorker:
         settings = GigaChatSettings.from_env() if self.model_enabled else None
         model_available = bool(settings and settings.credentials.get_secret_value().strip())
         mode = job.processing.mode or ("gigachat" if model_available else "local")
+        prefer_local = not flag("SPI_DEPLOYMENT") and flag("SPI_DEMO_MODEL_FALLBACK")
         if mode == "gigachat" and not model_available:
-            raise ProcessingFailure("model_unavailable_for_recovery")
+            if not prefer_local:
+                raise ProcessingFailure("model_unavailable_for_recovery")
+            mode = "local"
         diagnostic = job.processing.diagnostic
         if self.model_enabled and not model_available:
             diagnostic = "model_credentials_missing_local"
         self.queue.update(job, step="extracting", mode=mode, diagnostic=diagnostic)
         store = UploadProcessingStore(self.queue.root, upload, create=True)
+        if store.needs_reanalysis(mode):
+            store.archive_checkpoint()
         budget = min(self.max_requests, job.model_request_budget or self.max_requests)
         remaining = max(0, budget - job.model_requests)
         with ExitStack() as resources:
@@ -192,6 +209,7 @@ class UploadWorker:
                 complete=complete, max_requests=remaining,
                 pdf_content=content, retry_invalid_completion=True,
                 layout_reader=remote_layout if parser_enabled() else read_layout,
+                prefer_local=prefer_local,
             )
         self.queue.update(job, step="checking_results")
         _finish(self.queue, job, store)

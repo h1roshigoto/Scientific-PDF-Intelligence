@@ -46,11 +46,16 @@ function UploadAnalysis({ api, upload, token }: UploadViewProps) {
             <header className="section-bar"><h2>{upload.original_filename}</h2></header>
             <div className="upload-content">
               <UploadStatus state={state} />
-              {state.mode === 'local' && <p className="muted">Локальный анализ извлекает значения из доступных таблиц.</p>}
+              {state.mode === 'local' && <p className="muted">Локальный анализ извлекает значения с однозначной привязкой к таблице или тексту PDF.</p>}
               {state.human_review_required && <p>Научные записи и охват публикации требуют проверки человеком.</p>}
               {!state.counts && <button className="button" type="button" onClick={data.retry}>Обновить состояние</button>}
               {pdf !== 'valid' && <p role="alert">Оригинал PDF отсутствует или его SHA-256 изменился.</p>}
-              {state.counts?.results === 0 && <p>Научные записи не извлечены. Замечания по документу доступны ниже.</p>}
+              {state.counts?.results === 0 && <p>Научные записи не извлечены. {state.pages_needing_ocr.length > 0
+                ? 'В документе есть страницы, для которых требуется OCR.'
+                : state.coverage === 'present_not_extractable'
+                  ? 'Исходные таблицы или значения требуют ручной сверки. Подробности в научных замечаниях.'
+                  : state.coverage === 'no_supported_metrics' ? 'В доступном тексте не найдено значений выбранных метрик.'
+                    : 'Проверьте состояние обработки и научные замечания.'}</p>}
               {reviews.length > 0 && <div className="upload-form review-filters">
                 <label>Статус проверки<select value={filter} onChange={(event) => setFilter(event.target.value)}>
                   <option value="all">Все</option><option value="pending">Ожидают проверки</option>

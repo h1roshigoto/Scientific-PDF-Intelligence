@@ -24,19 +24,51 @@ export function ReviewBadge({ status }: { status: ReviewState['status'] }) {
 
 export function ReviewWarnings({ issues }: { issues: Issue[] }) {
   if (!issues.length) return null;
+  const groups = new Map<string, Issue[]>();
+  for (const issue of issues) {
+    const reference = issue.evidence_refs[0];
+    const label = [
+      typeof reference?.page === 'number' ? 'Стр. ' + reference.page : 'Документ',
+      typeof reference?.table === 'string' ? reference.table : '',
+    ].filter(Boolean).join(' · ');
+    groups.set(label, [...(groups.get(label) ?? []), issue]);
+  }
+  const severity = { info: 'Сведения', warning: 'Требует научной проверки', error: 'Ошибка анализа' };
   return <div className="review-warnings">
     <h3>Научные замечания</h3>
-    <ul className="upload-issues">{issues.map((issue) => <li key={issue.issue_id}>
-      <p>{issue.reason}</p>
-      {checkValues(issue).map(([label, value]) => <p className="muted" key={label}>{label} · {value}</p>)}
-      {issue.evidence_refs.map((reference, index) => (
-        <p className="muted" key={index}>
-          {typeof reference.page === 'number' && `Стр. ${reference.page}`}
-          {typeof reference.fragment === 'string' && ` · ${reference.fragment}`}
-        </p>
-      ))}
-    </li>)}</ul>
+    {[...groups].map(([label, group]) => <details key={label}>
+      <summary>{label} · {group.length}</summary>
+      <ul className="upload-issues">{group.map((issue) => <li key={issue.issue_id}>
+        <p><strong>{severity[issue.severity]}</strong> · {issue.reason}</p>
+        {checkValues(issue).map(([field, value]) => <p className="muted" key={field}>{field} · {value}</p>)}
+        {issue.evidence_refs.map((reference, index) => {
+          const sources: unknown[] = Array.isArray(reference.sources) ? reference.sources : [reference];
+          const details: unknown[] = Array.isArray(reference.details) ? reference.details : [];
+          return <div key={index}>
+            {sources.map((source, i) => {
+              const entry = record(source);
+              return typeof entry?.fragment === 'string' && <p className="muted" key={i}>{entry.fragment}</p>;
+            })}
+            {details.length > 0 && <details><summary>Исходные ячейки · {details.length}</summary>
+              <ul>{details.map((item, i) => {
+                const detail = record(item);
+                const headings = Array.isArray(detail?.headers)
+                  ? detail.headers.map((header: unknown) => record(header)?.text).filter(Boolean).join(' / ') : '';
+                const raw = record(detail?.value);
+                const coordinates = Array.isArray(raw?.bbox) ? raw.bbox.map((n: number) => n.toFixed(1)).join(', ') : '';
+                return <li key={i}>{[detail?.code, headings, raw?.text, coordinates, detail?.source_block_id]
+                  .filter((value): value is string => typeof value === 'string' && value.length > 0).join(' · ')}</li>;
+              })}</ul>
+            </details>}
+          </div>;
+        })}
+      </li>)}</ul>
+    </details>)}
   </div>;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
 }
 
 function History({ events }: { events: ReviewEvent[] }) {

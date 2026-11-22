@@ -190,7 +190,17 @@ def _summary(data):
                       "This package has no official submission status."),
     ]
     if not approved:
-        warnings.append(ExportWarning(code="zero_approved_results", message="Audit only. No current human approvals."))
+        if automatic_ids:
+            message = "Candidates exist. Open their PDF evidence and approve results to populate the reviewed CSV and JSON."
+        elif processing.pages_needing_ocr:
+            message = "No candidates have been extracted. Some pages require OCR."
+        elif processing.status == "failed" or processing.counts.pending_fragments:
+            message = "No candidates have been extracted. Processing is incomplete."
+        elif processing.coverage == "present_not_extractable":
+            message = "No candidates have been extracted. See unresolved source evidence in issues.json."
+        else:
+            message = "No supported scientific values were extracted from the available evidence."
+        warnings.append(ExportWarning(code="zero_approved_results", message=message))
     if ocr:
         warnings.append(ExportWarning(code="incomplete_ocr", message="Some PDF pages still require OCR."))
     if processing.mode == "local":
@@ -202,7 +212,7 @@ def _summary(data):
                                        "present_not_extractable"}):
         warnings.append(ExportWarning(code="partial_analysis", message="Analysis coverage is incomplete. "
                       "See processing details and scientific issues."))
-    if data.issues:
+    if severities["warning"] or severities["error"]:
         warnings.append(ExportWarning(code="unresolved_issues", message="Review approval does not close scientific issues."))
     return ValidationSummary(
         review_counts=ReviewCounts(

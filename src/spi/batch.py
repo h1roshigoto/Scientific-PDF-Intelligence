@@ -110,7 +110,9 @@ def preview(paths, domain, store):
 
 class Generation:
     def __init__(self, complete, max_requests=None, completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS,
-                 retry_invalid_completion=False):
+                 retry_invalid_completion=False, prefer_local=False):
+        self.prefer_local = prefer_local
+        self.model_fallback = False
         self.complete = complete
         self.limit = max_requests
         self.completion_max_tokens = completion_max_tokens
@@ -129,16 +131,23 @@ class Generation:
         attempted = False
         cache_key = sha256(f"{record['revision']}:{MODEL_PLAN_VERSION}:{fragment.id}".encode()).hexdigest()
         cache_file = Path("batch-cache") / f"{cache_key}.json"
+        local = self.complete is None or (self.prefer_local and bool(fragment.cells))
         try:
-            if self.complete is None:
+            if local:
                 proposals, model = offline_proposals(fragment, domain), "local"
             else:
+                if self.prefer_local and self.model_fallback:
+                    return {"status": "done", "page": fragment.page, "location": fragment.location}
                 cached = store.read(cache_file)
                 if cached:
                     completion = Completion.model_validate(cached)
                     event["cache_hit"] = True
                 elif self.limit is not None and self.calls >= self.limit:
                     event["error"] = "request_budget_exhausted"
+                    if self.prefer_local:
+                        self.model_fallback = True
+                        return {"status": "done", "page": fragment.page, "location": fragment.location,
+                                "model_fallback": event["error"]}
                     return {"status": "pending", "error": event["error"], "page": fragment.page}
                 else:
                     self.calls += 1
@@ -154,10 +163,17 @@ class Generation:
                 event["valid_json"] = True
         except GigaChatError as exc:
             event.update(completion_diagnostics(exc), error=exc.code, stage=exc.stage, http_status=exc.status)
+            if self.prefer_local:
+                self.model_fallback = True
+                return {"status": "done", "page": fragment.page, "location": fragment.location,
+                        "model_fallback": f"{exc.stage}:{exc.code}"}
             return {"status": "pending", "error": f"{exc.stage}:{exc.code}", "page": fragment.page,
                     "completion": event}
         except ValidationError:
             event["error"] = "invalid_schema"
+            if self.prefer_local:
+                return {"status": "done", "page": fragment.page, "location": fragment.location,
+                        "model_fallback": "invalid_schema"}
             if self.retry_invalid_completion:
                 return {"status": "pending", "error": "completion:invalid_schema", "page": fragment.page}
             return {"status": "review", "issues": ["invalid_schema"], "page": fragment.page}
@@ -181,11 +197,11 @@ class Generation:
             except EvidenceError as exc:
                 issues.append(str(exc))
                 rejected.append({"code": str(exc), "proposal": proposal.model_dump(mode="json")})
-        if self.complete is None or not proposals:
+        if local or not proposals:
             unresolved = list(unresolved_table_cells(fragment, domain, record["sha256"]))
             issues.extend(detail["code"] for detail in unresolved)
             review_details.extend(unresolved)
-            if self.complete is not None and fragment.cells and not unresolved:
+            if not local and fragment.cells and not unresolved:
                 issues.append("no_supported_proposal")
         if completion is not None and not event["cache_hit"] and (not issues or not proposals):
             store.write(cache_file, completion.model_dump(mode="json"))
@@ -229,6 +245,10 @@ def _plan_model_fragments(fragments, saved):
     return planned
 
 
+def extraction_revision(digest, domain, mode):
+    return f"{digest}|{LAYOUT_VERSION}|{PROFILES[domain]}|{SCHEMA_VERSIONS[domain]}|{mode}"
+
+
 def _process(store, path, domain, generation, previous, *, prioritize_cell=None, content=None, layout_reader=read_layout):
     pid = f"{domain}:{path.stem}"
     record = {"document_id": pid, "path": str(path), "domain": domain,
@@ -240,10 +260,11 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
         digest = sha256(content).hexdigest()
         mode = "local" if generation.complete is None else "gigachat"
         schema_version = SCHEMA_VERSIONS[domain]
-        revision = f"{digest}|{LAYOUT_VERSION}|{PROFILES[domain]}|{schema_version}|{mode}"
+        revision = extraction_revision(digest, domain, mode)
         if previous and previous.get("revision") == revision:
             record = {**previous, "path": str(path)}
-            plan_is_current = mode == "local" or record.get("model_plan_version") == MODEL_PLAN_VERSION
+            plan_is_current = (mode == "local" or generation.prefer_local
+                               or record.get("model_plan_version") == MODEL_PLAN_VERSION)
             if not prioritize_cell and plan_is_current and record["status"] in {"processed", "partial"} and not any(
                 unit["status"] == "pending" for unit in record["fragments"].values()
             ) and not record.get("retry_parse") and not record.get("pending_units") and (
@@ -253,7 +274,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
                 imported = next((d for d in store.documents() if d["document_id"] == pid), None)
                 if imported and imported.get("sha256") == digest and imported["file_path"] == str(path):
                     return
-        record.update(sha256=digest, revision=revision, status="running", parser_version=LAYOUT_VERSION,
+        record.update(issue_format=2, sha256=digest, revision=revision, status="running", parser_version=LAYOUT_VERSION,
                       profile=PROFILES[domain], schema_version=schema_version, mode=mode, errors=[])
         _checkpoint(store, record)
         metadata, pages, fragments, layout_issues = layout_reader(path, domain, content)
@@ -278,7 +299,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
             ]
         decision = _scope(store, record)
         record["scope_status_at_run"] = decision["status"]
-        if mode == "gigachat":
+        if mode == "gigachat" and not generation.prefer_local:
             fragments = _plan_model_fragments(fragments, record["fragments"])
             record["model_plan_version"] = MODEL_PLAN_VERSION
         record["planned_fragments"] = len(fragments)
@@ -297,6 +318,8 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
             fragments.remove(matches[0])
             fragments.insert(0, matches[0])
         _checkpoint(store, record)
+        if generation.prefer_local:
+            generation.model_fallback = any(f.get("model_fallback") for f in record["fragments"].values())
         for fragment in fragments:
             old = record["fragments"].get(fragment.id)
             if old and old["status"] != "pending":
@@ -323,8 +346,14 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
         record["extraction_coverage"] = (
             "pdf_pages_unprocessed" if record["retry_parse"] or record["pages_needing_ocr"] else
             "model_fragments_pending" if pending_units else
-            "present_not_extractable" if not results and layout_issues else
-            "partial_table_only" if generation.complete is None else "selected_fragments_reviewed"
+            "present_not_extractable" if not results and (
+                any(issue["reason"] != "table_outside_metric_scope" for issue in layout_issues)
+                or any(f["status"] == "review" for f in record["fragments"].values())
+            ) else
+            "no_supported_metrics" if not results else
+            "partial_table_only" if generation.complete is None or any(
+                f.get("model_fallback") for f in record["fragments"].values()
+            ) else "selected_fragments_reviewed"
         )
         record["status"] = "partial" if (
             pending_units or record["pages_needing_ocr"] or record["retry_parse"] or layout_issues
@@ -339,7 +368,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
 
 def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False,
               completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS, prioritize_cell=None, pdf_content=None,
-              retry_invalid_completion=False, layout_reader=read_layout):
+              retry_invalid_completion=False, layout_reader=read_layout, prefer_local=False):
     if prioritize_cell and (local_only or len(paths) != 1):
         raise ValueError("Prioritizing a source cell requires a model batch of exactly one PDF")
     if pdf_content is not None and len(paths) != 1:
@@ -361,7 +390,7 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
             return client.complete_json(prompt, schema=None if json_only else schema, max_tokens=completion_max_tokens)
 
         generation = Generation(None if local_only else complete or live, max_requests, completion_max_tokens,
-                                retry_invalid_completion)
+                                retry_invalid_completion, prefer_local)
         prior = {r["document_id"]: r for r in store.batch_documents(domain)}
         selected = {f"{domain}:{path.stem}" for path in paths}
         # Register every selected PDF before the first expensive operation.
