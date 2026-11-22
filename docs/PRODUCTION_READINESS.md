@@ -4,57 +4,29 @@
 
 **PUBLIC PRODUCTION SMOKE: NOT RUN**
 
-Публичный сервер, домен и DNS для этого этапа не предоставлены. Локальные
-проверки Compose и GitHub Actions дают свидетельства об изменениях кода и
-сборке. Допуск требует результатов на действующей публичной установке.
+В P0 №32 публичный сервер, домен и DNS не предоставлены. Windows Docker Desktop и CI дают свидетельства о конкретных образах. Проверки целевой установки проводит оператор.
 
-| Обязательный контроль | Статус production | Свидетельство для PASS |
-| --- | --- | --- |
-| Production Docker images | NOT RUN | Сборка и указанная пара OCI digests на сервере |
-| Non-root API и worker | NOT RUN | `docker inspect` и effective uid/capabilities в контейнере |
-| Ограничения ресурсов | NOT RUN | Cgroup CPU, RAM и PID, nofile, deadline и отказ при перегрузке |
-| Trusted proxy configuration | NOT RUN | Статический /32, проверка на реальном proxy и закрытый порт API |
-| Настоящий HTTPS certificate | NOT RUN | DNS, hostname, публичная trust chain, redirect, HSTS и ACME state |
-| Secure cookies и CSRF | NOT RUN | Сквозная браузерная проверка cookie, Host, Origin и CSRF |
-| Tenant isolation | NOT RUN | Положительные и отрицательные проверки Alice/Bob на сервере |
-| Защита всех PDF parsing paths | NOT RUN | Результаты seccomp/Landlock и инвентаризации разбора на целевом ядре |
-| Persistent storage | NOT RUN | Перезапуски и замена образа под тем же dataset |
-| Backup и restore | NOT RUN | Cold snapshot и отдельное восстановление с SHA-256, review history и проверкой ACL |
-| Monitoring | NOT RUN | Реальные метрики и настройка оповещений на сервере |
-| Лимиты диска | NOT RUN | Изоляция разделов или квот и воспроизводимый отказ на host filesystem |
-| Security scans | BLOCKED | Разобрать оставшиеся HIGH в OCI-компонентах и пересканировать развёрнутые digests |
-| Production E2E | NOT RUN | Протокол публичного smoke и синтетической сквозной проверки |
+| Контроль | Первичное свидетельство |
+| --- | --- |
+| `production_images`, `non_root`, `resource_limits` | Развёрнутые OCI digest, `docker inspect` и фактические cgroup/UID/capabilities |
+| `trusted_proxy`, `public_tls`, `cookies_csrf` | Внешний DNS и TLS, hostname, firewall, HTTPS, HSTS, Host, Origin, CSRF и cookie |
+| `tenant_isolation`, `pdf_isolation` | Alice/Bob и реальный seccomp/Landlock на целевом ядре |
+| `persistent_storage`, `disk_limits` | Перезапуски, независимые host quota или разделы, тест ENOSPC без потери записи |
+| `backup_restore` | Зашифрованный backup и независимый restore с SHA-256, ACL, review history и недействительными старыми сессиями |
+| `monitoring` | Тестовая доставка alert до операторского receiver |
+| `production_e2e` | Протокол полного публичного smoke, два синтетических PDF и оба ZIP verifier |
+| `security_scans`, `security_high`, `release_tests` | Исходные OCI-архивы, Trivy JSON, release manifest и результаты заданий одного доверенного Actions run |
 
-`PASS` требует проверенного результата и датированного свидетельства.
-`FAIL` означает несоответствие при проверке. `NOT RUN` означает отсутствие
-проведённой проверки. `BLOCKED` означает обнаруженный запрет на публичный
-запуск. Любой статус кроме `PASS` у обязательного пункта сохраняет
-`NOT READY`. Локальные результаты и причины блокировки сканов приведены
-в [отчёте P0 №31](P0_31_RESULTS.md). Процедуры и границы доверия описаны в
-[Security model](SECURITY_MODEL.md) и [Deployment](DEPLOYMENT.md).
+Сохраните JSON с независимо установленной идентичностью целевого развёртывания. Включите `environment: "public-production"`, `environment_id`, `public_origin`, `hostname`, `revision` (40-значный Git SHA) и `image_digests` с ключами `runtime` и `proxy` и платформенными OCI digest. Подтверждайте digest на хосте из image reference и локального registry metadata.
+
+В evidence JSON включите эти же поля, `schema_version: 2` и объект `controls`. Для каждого операторского контроля добавьте `outcome` со значением `verified`, `failed` или `blocked`, имя ответственного в `operator`, UTC-время в `checked_at`, ссылку HTTPS на первичное свидетельство в `reference`, имя локального файла рядом с evidence JSON в `artifact` и его SHA-256 с префиксом `sha256:` в `sha256`. Для `backup_restore` укажите отдельный `restore_environment_id`. Отсутствующий контроль сохраняет `NOT RUN`. Операторские свидетельства действуют семь дней, OCI-сканы три дня. Дубликаты JSON, конфликт идентичности, неверный origin или digest и отсутствие первичного файла завершают проверку ошибкой.
+
+Скачайте исходные OCI-архивы, Trivy и release manifest из одного доверенного Actions run и поместите в один каталог. CLI перепроверяет OCI manifest, config, связь со сканом, политику HIGH и привязку тестов к релизу. Файлы и хеши подтверждают согласованность материала. Источник Actions проверяет оператор. Операторские результаты отображаются как `operator-attested`.
 
 ```bash
 python -m spi.ops.production_check
-python -m spi.ops.production_check --evidence /path/to/production-evidence.json --json
+python -m spi.ops.production_check --evidence evidence.json \
+  --expected-deployment deployment-identity.json --scans ./artifacts --json
 ```
 
-Команда возвращает 0 только для `READY`, 1 для `NOT READY` и 2 при
-невалидном отчёте. Доверенный оператор составляет JSON после проверок
-указанной версии и origin. Формат принимает ключи контролей из вывода
-`--json`. Пример ниже демонстрирует структуру, с незаполненными контролями
-результат остаётся `NOT READY`.
-
-```json
-{
-  "environment": "public-production",
-  "public_origin": "https://spi.example.org",
-  "revision": "0123456789abcdef0123456789abcdef01234567",
-  "controls": {
-    "public_tls": {
-      "status": "PASS",
-      "reference": "operator report for the named release",
-      "checked_at": "2026-11-22T12:00:00Z"
-    }
-  }
-}
-```
+Код 0 означает `READY`, 1 означает `NOT READY`, 2 означает ошибку свидетельства. Разрешение на публичный запуск фиксирует оператор после проверки первичных материалов. Порядок действий приведён в [Release checklist](RELEASE_CHECKLIST.md).

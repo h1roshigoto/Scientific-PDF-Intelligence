@@ -20,8 +20,10 @@ from urllib.parse import quote
 from zipfile import BadZipFile
 
 import httpx
+import pymupdf
 
 from spi.upload_export_verify import verify
+from spi.ops.encrypted_backup import Repository
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "frontend_redezigned/tests/e2e"))
@@ -34,11 +36,13 @@ class Compose:
         self.project = project
         self.origin = f"https://localhost:{port}"
         segment = int(backups.split("-")[-2][:2], 16)
-        self.env = {**os.environ, "SPI_LOCAL_PORT": str(port), "SPI_LOCAL_BACKUP_VOLUME": backups,
+        self.env = {**{key: value for key, value in os.environ.items() if not key.startswith("SPI_")},
+                    "SPI_LOCAL_PORT": str(port), "SPI_LOCAL_BACKUP_VOLUME": backups,
                     "SPI_BACKEND_SUBNET": f"10.92.{segment}.0/28",
                     "SPI_BACKEND_DYNAMIC_RANGE": f"10.92.{segment}.8/29",
                     "SPI_PROXY_IP": f"10.92.{segment}.2", "SPI_EDGE_SUBNET": f"10.92.{segment}.16/28"}
-        self.command = ["docker", "compose", "-p", project, "-f", "compose.yaml", "-f", "compose.local.yaml"]
+        self.command = ["docker", "compose", "--env-file", os.devnull, "-p", project,
+                        "-f", "compose.yaml", "-f", "compose.local.yaml"]
 
     def run(self, *args, stdin=None, expected=0, timeout=180):
         result = subprocess.run(
@@ -161,6 +165,8 @@ def network_contract(client, origin):
     for path in ("documents", "results", "issues", "export/results.json", "__ops/ready", "openapi.json"):
         status(client.get("/api/" + path), 404)
     status(client.post("/api/auth/logout", headers={"Origin": origin}), 403)
+    status(client.post("/api/auth/logout", headers={**csrf(client, origin), "X-SPI-CSRF": "invalid"}), 403)
+    status(client.get("/api/auth/me", headers={"Cookie": "__Host-spi-session=invalid-base64!!!"}), 401)
     status(client.post("/api/auth/logout", headers={**csrf(client, origin), "Origin": "https://foreign.example"}), 403)
     cors = client.options("/api/auth/login", headers={"Origin": "https://foreign.example",
                           "Access-Control-Request-Method": "POST"})
@@ -169,7 +175,116 @@ def network_contract(client, origin):
     return private_query
 
 
-def worker_recovery(compose, client, origin, path, owner, upload_id):
+def untrusted_backend(compose):
+    probe = """
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+import sys
+request = Request('http://api:8000/health', headers={
+    'Host': sys.argv[1], 'X-Forwarded-For': '192.0.2.1',
+    'X-Forwarded-Proto': 'https', 'Forwarded': 'proto=https'})
+try:
+    urlopen(request, timeout=5)
+except HTTPError as exc:
+    assert exc.code == 403 and b'https_required' in exc.read()
+else:
+    raise AssertionError('Untrusted backend peer was accepted')
+"""
+    subprocess.run(["docker", "run", "--rm", "--network", f"{compose.project}_backend",
+                    "spi-runtime:local", "python", "-c", probe, compose.origin.removeprefix("https://")], check=True)
+    print("PASS untrusted backend peer cannot assert forwarded client or HTTPS", flush=True)
+
+
+def crash_parser(compose, client, source):
+    program = r"""
+import os, signal, time
+from pathlib import Path
+
+print('ready', flush=True)
+until = time.monotonic() + 8
+while time.monotonic() < until:
+    for entry in Path('/proc').glob('[0-9]*/cmdline'):
+        if int(entry.parent.name) == os.getpid():
+            continue
+        try:
+            if b'spi.ops.pdf_sandbox\x00child\x00pages\x00' in entry.read_bytes():
+                os.kill(int(entry.parent.name), signal.SIGKILL)
+                print('interrupted', flush=True)
+                raise SystemExit
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
+            continue
+    time.sleep(.005)
+raise SystemExit('No disposable parser child observed')
+"""
+    command = [*compose.command, "exec", "-T", "sandbox", "python", "-c", program]
+    before = status(client.get("/api/uploads"), 200).json()
+    headers = csrf(client, compose.origin)
+    with subprocess.Popen(command, cwd=ROOT, env=compose.env, stdout=subprocess.PIPE, text=True) as watcher:
+        assert watcher.stdout.readline().strip() == "ready"
+        reply = client.post("/api/uploads", headers=headers, data={"domain": "solar"},
+                            files={"file": ("synthetic-crash.pdf", source.read_bytes(), "application/pdf")})
+        assert watcher.communicate(timeout=12)[0].strip() == "interrupted" and watcher.returncode == 0
+    assert status(reply, 503).json() == {"detail": "pdf_parser_unavailable"}
+    assert status(client.get("/api/uploads"), 200).json() == before
+    print("PASS parser child interruption returned a recoverable error without publishing an upload", flush=True)
+
+
+def local_alert(compose, directory):
+    def delivered():
+        for line in compose.run("logs", "--no-log-prefix", "monitoring").splitlines():
+            if not line.startswith("{"):
+                continue
+            record = json.loads(line)
+            if record.get("alert") == "backup_failed" and record.get("state") == "firing":
+                return record
+        return None
+
+    target = directory / "local-alert-receiver.json"
+    target.write_text(json.dumps(wait_for(delivered, timeout=25)), encoding="utf-8")
+    event = json.loads(target.read_text(encoding="utf-8"))
+    assert set(event) == {"timestamp", "service", "severity", "code", "alert", "state"}
+    assert event["service"] == "monitoring" and event["code"] == "alert"
+    print("PASS backup failure alert delivered to a local receiver through monitoring logs", flush=True)
+
+
+def encrypted_rehearsal(compose, directory):
+    plain, secrets, exports = (directory / name for name in ("plaintext", "restic-keys", "restic-restored"))
+    for path in (plain, secrets, exports):
+        path.mkdir(mode=0o700)
+    for name in ("correct", "incorrect"):
+        (secrets / name).write_text(token_urlsafe(40) + "\n", encoding="ascii")
+        (secrets / name).chmod(0o600)
+    holder = compose.run("run", "-d", "--rm", "--no-deps", "--entrypoint", "sleep", "backup", "120").splitlines()[-1]
+    archive = plain / "rehearsal.tar"
+    try:
+        subprocess.run(["docker", "cp", f"{holder}:/backups/rehearsal.tar", str(archive)], check=True)
+        repo = Repository(directory / "restic-repository", secrets / "correct")
+        repo.initialize()
+        point = repo.store(archive, directory)
+        repo.verify()
+        target = exports / "snapshot.tar"
+        wrong = Repository(repo.path, secrets / "incorrect")
+        try:
+            wrong.restore(point, target, directory)
+        except subprocess.CalledProcessError:
+            assert not target.exists()
+        else:
+            raise AssertionError("Incorrect restic password was accepted")
+        assert repo.restore(point, target, directory) == "sha256:" + sha256(archive.read_bytes()).hexdigest()
+        another = repo.store(archive, directory)
+        assert another != point
+        assert point in repo.retention(7, 4, 12, point)["keep"]
+        with target.open("rb") as stream:
+            subprocess.run(["docker", "exec", "-i", holder, "sh", "-ec",
+                            "umask 077; cat > /backups/encrypted-roundtrip.tar"], stdin=stream, check=True)
+    finally:
+        subprocess.run(["docker", "stop", holder], check=True, stdout=subprocess.DEVNULL)
+    print("PASS restic encryption, data verification, wrong-key refusal, byte-identical restore and retention dry-run",
+          flush=True)
+    return "encrypted-roundtrip"
+
+
+def worker_recovery(compose, client, origin, path, owner, upload_id, other_client, other_path):
     compose.run("pause", "worker")
     headers = csrf(client, origin)
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -186,12 +301,15 @@ def worker_recovery(compose, client, origin, path, owner, upload_id):
         wait_for(lambda: compose.run("exec", "-T", "api", "python", "-c", probe, checkpoint) == "running", timeout=15)
         compose.run("kill", "-s", "SIGKILL", "worker")
         assert status(client.get(path + "/processing"), 200).json()["status"] == "processing"
+        status(other_client.post(other_path + "/process", headers=csrf(other_client, origin)), 202)
+        assert status(other_client.get(other_path + "/processing"), 200).json()["status"] == "queued"
     finally:
         compose.run("unpause", "sandbox")
     wait_for(lambda: compose.container_health("sandbox") == "healthy")
     compose.start("--scale", "worker=2")
     recovered = wait_for(lambda: finished(client, path), timeout=70)
     assert recovered["job_id"] == jobs.pop() and recovered["recoveries"] == 1
+    wait_for(lambda: finished(other_client, other_path), timeout=70)
     compose.start("--scale", "worker=1")
     print("PASS concurrent enqueue and two workers, SIGKILL after persisted checkpoint, same job recovered", flush=True)
 
@@ -347,12 +465,13 @@ def log_check(compose, forbidden):
     assert '"request_id":' in logs and '"service": "monitoring"' in logs
 
 
-def scenario(primary, restored, directory, *, browser=False):
+def scenario(primary, restored, directory, *, browser=False, encrypted=False):
     primary.start()
     alice, ca = primary.client(directory)
     bob, _ = primary.client(directory)
     with closing(alice), closing(bob):
         private_query = network_contract(alice, primary.origin)
+        untrusted_backend(primary)
         network_password = token_urlsafe(23)
         password_admin = token_urlsafe(23)
 
@@ -368,9 +487,14 @@ def scenario(primary, restored, directory, *, browser=False):
         solar, rag = directory / "Synthetic Solar.pdf", directory / "Synthetic RAG.pdf"
         processing_fixture(solar)
         rag_fixture(rag)
-        path_a = upload(alice, primary.origin, solar, "solar", filename="Алиса Solar.pdf")
-        status(alice.post(path_a + "/process", headers=csrf(alice, primary.origin)), 202)
-        wait_for(lambda: finished(alice, path_a))
+        status(alice.post("/api/uploads", headers=csrf(alice, primary.origin), data={"domain": "solar"},
+                          files={"file": ("invalid.pdf", b"%PDF-1.7\ntruncated", "application/pdf")}), 422)
+        crash_parser(primary, alice, solar)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            alice_upload = pool.submit(upload, alice, primary.origin, solar, "solar", "Алиса Solar.pdf")
+            bob_upload = pool.submit(upload, bob, primary.origin, rag, "rag")
+            path_a, path_b = alice_upload.result(), bob_upload.result()
+        worker_recovery(primary, bob, primary.origin, path_b, owner, path_b.rsplit("/", 1)[1], alice, path_a)
         results_a = status(alice.get(path_a + "/results"), 200).json()
         assert len(results_a) == 4
         original_a = status(alice.get(path_a + "/file"), 200).content
@@ -383,6 +507,10 @@ def scenario(primary, restored, directory, *, browser=False):
             "warnings_acknowledged": True,
         }), 201)
         assert approved.json()["status"] == "approved"
+        status(alice.post(review, headers=csrf(alice, primary.origin), json={
+            "basis": basis, "expected_revision": 0, "action": "approve", "evidence_mode": "text",
+            "warnings_acknowledged": True,
+        }), 409)
         history = status(alice.get(review + "/history"), 200).json()
         assert len(history) == 1
         snapshot_a = export(alice, path_a, directory / "alice-before.zip")
@@ -400,13 +528,26 @@ def scenario(primary, restored, directory, *, browser=False):
         logout_cookie = alice.cookies[cookie_name]
         status(alice.post("/api/auth/logout", headers=csrf(alice, primary.origin)), 204)
         status(alice.get("/api/auth/me", headers={"Cookie": f"{cookie_name}={logout_cookie}"}), 401)
-        assert status(bob.get("/api/uploads"), 200).json() == []
+        assert status(bob.get("/api/uploads"), 200).json()[0]["upload_id"] == path_b.rsplit("/", 1)[1]
         for endpoint in ("/file", "/results", "/export/project.zip"):
             status(bob.get(path_a + endpoint), 404)
-        path_b = upload(bob, primary.origin, rag, "rag")
-        worker_recovery(primary, bob, primary.origin, path_b, owner, path_b.rsplit("/", 1)[1])
         results_b = status(bob.get(path_b + "/results"), 200).json()
         assert len(results_b) == 16
+        rag_review = path_b + "/results/" + quote(results_b[0]["result_id"], safe="") + "/review"
+        rag_basis = status(bob.get(rag_review), 200).json()["basis"]
+        proposal = status(bob.post(rag_review, headers=csrf(bob, primary.origin), json={
+            "basis": rag_basis, "expected_revision": 0, "action": "propose_correction",
+            "correction": {"context": {"top_k": 3}}, "reason": "Synthetic retrieval setting",
+        }), 201).json()
+        assert proposal["status"] == "correction_proposed"
+        decision = status(bob.post(rag_review, headers=csrf(bob, primary.origin), json={
+            "basis": rag_basis, "expected_revision": 1, "action": "approve_correction",
+            "evidence_mode": "text", "warnings_acknowledged": True,
+        }), 201).json()
+        assert decision["status"] == "approved_corrected"
+        assert decision["decision"]["reviewed_result"]["metric"] == results_b[0]["metric"]
+        rag_history = status(bob.get(rag_review + "/history"), 200).json()
+        snapshot_b = export(bob, path_b, directory / "bob-before.zip")
         primary.run("restart", "api", "worker")
         wait_for(lambda: bob.get("/api/auth/me").status_code == 200)
         assert status(bob.get(path_b + "/results"), 200).json() == results_b
@@ -420,27 +561,29 @@ def scenario(primary, restored, directory, *, browser=False):
         old_cookie = alice.cookies[cookie_name]
         generated_secret = primary.run("exec", "-T", "api", "cat", "/local-secret/auth")
         log_check(primary, [invite_alice, invite_bob, network_password, password_admin,
-                            old_cookie, generated_secret, private_query])
+                            old_cookie, generated_secret, private_query, "Алиса Solar.pdf", "Synthetic RAG.pdf"])
         primary.run("run", "--rm", "--no-deps", "backup", "create", "must-refuse-active", expected=1)
+        local_alert(primary, directory)
         primary.run("stop", "proxy", "worker", "api")
         output = primary.run("run", "--rm", "--no-deps", "backup", "create", "rehearsal")
         manifest = json.loads(output.splitlines()[-1])
-        assert manifest["counts"] == {"jobs": 2, "review_events": 1, "uploads": 2, "users": 3}
+        assert manifest["counts"] == {"jobs": 2, "review_events": 3, "uploads": 2, "users": 3}
         assert manifest["configuration"]["session_policy"] == "excluded"
         assert {sha256(solar.read_bytes()).hexdigest(), sha256(rag.read_bytes()).hexdigest()} <= {
             row["sha256"] for row in manifest["files"].values()
         }
         interrupted_backup(primary)
         primary.run("run", "--rm", "--no-deps", "backup", "verify", "rehearsal")
+        restore_name = encrypted_rehearsal(primary, directory) if encrypted else "rehearsal"
         # Copy into an intentionally incomplete artifact in the disposable backup volume.
         primary.run("run", "--rm", "--no-deps", "--entrypoint", "python", "backup", "-c",
                     "from pathlib import Path; Path('/backups/truncated.tar').write_bytes("
                     "Path('/backups/rehearsal.tar').read_bytes()[:2048])")
         primary.run("down")  # Release the network before starting the other project.
         restored.run("run", "--rm", "--no-deps", "restore", "truncated", expected=1)
-        restored.run("run", "--rm", "--no-deps", "restore", "rehearsal", "--dry-run")
-        restored.run("run", "--rm", "--no-deps", "restore", "rehearsal")
-        restored.run("run", "--rm", "--no-deps", "restore", "rehearsal", expected=1)
+        restored.run("run", "--rm", "--no-deps", "restore", restore_name, "--dry-run")
+        restored.run("run", "--rm", "--no-deps", "restore", restore_name)
+        restored.run("run", "--rm", "--no-deps", "restore", restore_name, expected=1)
         restored.start()
         with closing(restored.client(directory)[0]) as restored_alice, closing(restored.client(directory)[0]) as restored_bob:
             status(restored_alice.get("/api/auth/me", headers={"Cookie": f"{cookie_name}={old_cookie}"}), 401)
@@ -452,6 +595,8 @@ def scenario(primary, restored, directory, *, browser=False):
             assert status(restored_bob.get(path_b + "/results"), 200).json() == results_b
             assert status(restored_alice.get(review + "/history"), 200).json() == history
             assert export(restored_alice, path_a, directory / "alice-after.zip") == snapshot_a
+            assert status(restored_bob.get(rag_review + "/history"), 200).json() == rag_history
+            assert export(restored_bob, path_b, directory / "bob-after.zip") == snapshot_b
             status(restored_bob.get(path_a + "/file"), 404)
             status(restored_bob.get(path_a + "/export/project.zip"), 404)
             status(restored_alice.get(path_b + "/results"), 404)
@@ -480,6 +625,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--browser", action="store_true", help="Use Chromium with an isolated NSS trust store on Linux")
+    parser.add_argument("--encrypted", action="store_true", help="Exercise a local repository using restic from PATH")
     args = parser.parse_args()
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -497,6 +643,9 @@ def main():
             environment = {key: value for key, value in os.environ.items() if not key.startswith("SPI_")}
             environment.update({f"SPI_HOST_{key}": f"/tmp/spi-e2e/{key.lower()}"
                                 for key in ("DATASET", "BACKUPS", "PROXY_DATA", "AUTH_SECRET_FILE")})
+            for image in ("RUNTIME", "PROXY"):
+                environment[f"SPI_{image}_REPOSITORY"] = f"registry.example.org/spi/{image.lower()}"
+                environment[f"SPI_{image}_DIGEST"] = "sha256:" + "0" * 64
             missing_tls = subprocess.run(
                 ["docker", "compose", "--env-file", str(blank), "-f", "compose.yaml", "-f", "compose.production.yaml",
                  "config", "--quiet"], cwd=ROOT, env=environment, capture_output=True, text=True,
@@ -504,7 +653,7 @@ def main():
             assert missing_tls.returncode and any(key in missing_tls.stderr for key in (
                 "SPI_PUBLIC_DOMAIN", "SPI_PUBLIC_ORIGIN", "SPI_AUTH_ALLOWED_ORIGINS",
             ))
-            scenario(primary, restored, directory, browser=args.browser)
+            scenario(primary, restored, directory, browser=args.browser, encrypted=args.encrypted)
     finally:
         # Project names and volumes are generated only for this test invocation.
         restored.run("down", "-v")

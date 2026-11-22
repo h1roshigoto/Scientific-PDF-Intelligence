@@ -1,0 +1,1028 @@
+{
+  "assessments": {
+    "CVE-2025-69720": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2025-69720",
+      "approval": "none",
+      "component": "ncurses infocmp CLI",
+      "reachability_and_residual_risk": "No service calls infocmp on untrusted terminfo. Debian's source-package record also covers base and linked libraries.",
+      "remediation": "No Trixie fix confirmed. Review if terminal tooling is exposed to tenant input.",
+      "type": "stack buffer overflow"
+    },
+    "CVE-2026-116587": {
+      "advisory": "https://github.com/go-jose/go-jose/security/advisories/GHSA-mgcc-cww5-fp2q",
+      "approval": "none",
+      "component": "go-jose v3 JWK RSA validation in Smallstep chain",
+      "reachability_and_residual_risk": "Caddy TLS and local CA use trusted material. The deployed routes do not parse caller-supplied JWKs. Reassess if a remote JWK source or Smallstep provisioner is enabled.",
+      "remediation": "No patched v3 release. Track Smallstep and Caddy updates; v4 alone does not cover the v3 dependency.",
+      "type": "CPU denial of service"
+    },
+    "CVE-2026-119373": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-119373",
+      "approval": "none",
+      "component": "SQLite FTS5",
+      "reachability_and_residual_risk": "No FTS5 tables or user-defined SQL in application paths. Auth and processing databases are created by SPI; restore is an operator path.",
+      "remediation": "No Trixie fix confirmed. Keep operator backup sources authenticated and re-evaluate any future SQLite imports or FTS use.",
+      "type": "heap buffer overflow and availability"
+    },
+    "CVE-2026-119374": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-119374",
+      "approval": "none",
+      "component": "SQLite FTS5 secure deletion",
+      "reachability_and_residual_risk": "Requires a database with a corrupt FTS5 index and deletion in the affected mode. SPI does not use FTS5 or accept uploaded SQLite databases.",
+      "remediation": "No Trixie fix confirmed. Treat the risk as open if restore input trust or SQLite features change.",
+      "type": "heap memory corruption"
+    },
+    "CVE-2026-119379": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-119379",
+      "approval": "none",
+      "component": "SQLite session changesets",
+      "reachability_and_residual_risk": "Requires SQLite session changeset processing. SPI does not apply user-provided changesets or expose arbitrary SQLite commands.",
+      "remediation": "No Trixie fix confirmed. Re-evaluate before exposing any database changeset path.",
+      "type": "memory corruption"
+    },
+    "CVE-2026-124709": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-124709",
+      "approval": "none",
+      "component": "OpenSSL QUIC server stream management",
+      "reachability_and_residual_risk": "The Python service accepts TCP HTTP on a private network and has no OpenSSL QUIC listener. Caddy uses Go TLS and QUIC. Worker and sandbox are networkless.",
+      "remediation": "Candidate OpenSSL Debian revision 3.5.9-1~deb13u1 still reports HIGH. Re-evaluate on a Trixie backport or a topology change.",
+      "type": "memory exhaustion"
+    },
+    "CVE-2026-16742": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-16742",
+      "approval": "none",
+      "component": "systemd-homed account and group handling",
+      "reachability_and_residual_risk": "The runtime packages contain libraries. SPI does not run systemd-homed or host account provisioning. Audit independently on the target host.",
+      "remediation": "No Trixie fix confirmed for the source package. Re-evaluate on host or init changes.",
+      "type": "local privilege escalation"
+    },
+    "CVE-2026-54369": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-54369",
+      "approval": "none",
+      "component": "libacl pathname-based ACL operations",
+      "reachability_and_residual_risk": "A privileged caller would need to resolve a locally writable path. SPI does not manage ACLs from request paths, uses separate private mounts and runs without capabilities.",
+      "remediation": "No Trixie backport confirmed. Retest after a Debian point release. Host ACL tooling is a separate review.",
+      "type": "local privilege escalation"
+    },
+    "CVE-2026-76642": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-76642",
+      "approval": "none",
+      "component": "util-linux mount helper post-hooks",
+      "reachability_and_residual_risk": "Requires the affected privileged mount context. Services have no mount capabilities or application call path to mount. Host mount tooling is separately scoped.",
+      "remediation": "No Trixie fix confirmed. Keep deployment non-root and restrict host mount permissions.",
+      "type": "local privileged mount side effects"
+    },
+    "CVE-2026-78408": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-78408",
+      "approval": "none",
+      "component": "util-linux nsenter cgroup mode",
+      "reachability_and_residual_risk": "Requires privileged nsenter in an attacker-influenced context. No container invokes nsenter or holds host cgroup authority.",
+      "remediation": "No Trixie fix confirmed. Audit host namespace tooling and privileged automation separately.",
+      "type": "leaked privileged cgroup authority"
+    },
+    "CVE-2026-78409": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-78409",
+      "approval": "none",
+      "component": "util-linux libmount subtree resolution",
+      "reachability_and_residual_risk": "Requires a privileged mount caller and attacker influence on mount paths. Docker mount locations come from operator config, outside tenant inputs.",
+      "remediation": "No Trixie fix confirmed. Verify host mounts and restrict operators of Docker.",
+      "type": "unsafe privileged mount path resolution"
+    },
+    "CVE-2026-78410": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-78410",
+      "approval": "none",
+      "component": "util-linux libmount restricted bind mounts",
+      "reachability_and_residual_risk": "Requires a privileged mount path. OCI services drop capabilities and do not process user mount options.",
+      "remediation": "No Trixie fix confirmed. Verify host mount inputs and preserve container restrictions.",
+      "type": "unsafe privileged mount ownership changes"
+    },
+    "CVE-2026-78661": {
+      "advisory": "https://pkg.go.dev/vuln/GO-2026-6860",
+      "approval": "none",
+      "component": "golang.org/x/net/html",
+      "reachability_and_residual_risk": "Static files and reverse proxy routes do not parse requester HTML through this library as configured. The patched module is linked regardless of reachability.",
+      "remediation": "Update to v0.62.0 and verify the rebuilt Caddy artifact.",
+      "type": "parser resource exhaustion"
+    },
+    "CVE-2026-9538": {
+      "advisory": "https://security-tracker.debian.org/tracker/CVE-2026-9538",
+      "approval": "none",
+      "component": "Perl Archive::Tar",
+      "reachability_and_residual_risk": "SPI uses Python tarfile for bounded operator backup files. The Perl Archive::Tar module is not used for PDF, API requests or restores.",
+      "remediation": "Trixie fix deferred. Reassess if an operator or new entry point uses Perl for attacker-controlled TAR data.",
+      "type": "memory exhaustion"
+    }
+  },
+  "baseline_revision": "4fd20ba8e365794a8fcc23740423b55962d690d7",
+  "candidate_origin": "Local linux/amd64 validation builds; verify actual release identity in Actions artifacts.",
+  "high_findings": [
+    {
+      "advisory_source": "The Go Vulnerability Database",
+      "cve": "CVE-2026-78661",
+      "disposition": "fixed",
+      "fixed_version": "0.62.0",
+      "image": "proxy",
+      "installed_version": "v0.60.0",
+      "layer": {
+        "DiffID": "sha256:3c114bfcc7d2d964fde1f0282c3fdc31eb56141e124e1dddafe942675ca7999b",
+        "Digest": "sha256:592aefdf2f3e29c99c0ab5ac18520eda8a3d67362bff5a827f0104a4968ef045"
+      },
+      "observed": "baseline",
+      "package": "golang.org/x/net",
+      "scanner_status": "fixed",
+      "target_type": "gobinary"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "bsdutils",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "bsdutils",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "bsdutils",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "bsdutils",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-54369",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.3.2-2+b1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libacl1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libblkid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libblkid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libblkid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libblkid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "liblastlog2-2",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "liblastlog2-2",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "liblastlog2-2",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "liblastlog2-2",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libmount1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libmount1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libmount1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libmount1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2025-69720",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "6.5+20250216-2",
+      "layer": {
+        "DiffID": "sha256:96a69f98ae076bdff5264720ee922820291d658c6a2df97f7c4899864ceb7ea8",
+        "Digest": "sha256:2dc99d2d0a39fce31e37615eb4c932e16dcc4c2b0ce9993714280081b5dbe085"
+      },
+      "observed": "candidate",
+      "package": "libncursesw6",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsmartcols1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsmartcols1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsmartcols1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsmartcols1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-119373",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.46.1-7+deb13u2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsqlite3-0",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-119374",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.46.1-7+deb13u2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsqlite3-0",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-119379",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.46.1-7+deb13u2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsqlite3-0",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-124709",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.5.9-1~deb13u1",
+      "layer": {
+        "DiffID": "sha256:1821884b22a78e7d27b98bb0efca9e107fe7804abdbbb4f08e9dfa453270786c",
+        "Digest": "sha256:5a06902cb4c30abff09839fed0f1ad525f5d0158538c516383bdd7f7b65a68b9"
+      },
+      "observed": "candidate",
+      "package": "libssl3t64",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-16742",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "257.13-1~deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libsystemd0",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2025-69720",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "6.5+20250216-2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libtinfo6",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-16742",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "257.13-1~deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libudev1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libuuid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libuuid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libuuid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "libuuid1",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:4.16.0-2+really2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "login",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:4.16.0-2+really2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "login",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:4.16.0-2+really2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "login",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "1:4.16.0-2+really2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "login",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "mount",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "mount",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "mount",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "mount",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2025-69720",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "6.5+20250216-2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "ncurses-base",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2025-69720",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "6.5+20250216-2",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "ncurses-bin",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-124709",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.5.9-1~deb13u1",
+      "layer": {
+        "DiffID": "sha256:1821884b22a78e7d27b98bb0efca9e107fe7804abdbbb4f08e9dfa453270786c",
+        "Digest": "sha256:5a06902cb4c30abff09839fed0f1ad525f5d0158538c516383bdd7f7b65a68b9"
+      },
+      "observed": "candidate",
+      "package": "openssl",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-124709",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "3.5.9-1~deb13u1",
+      "layer": {
+        "DiffID": "sha256:1821884b22a78e7d27b98bb0efca9e107fe7804abdbbb4f08e9dfa453270786c",
+        "Digest": "sha256:5a06902cb4c30abff09839fed0f1ad525f5d0158538c516383bdd7f7b65a68b9"
+      },
+      "observed": "candidate",
+      "package": "openssl-provider-legacy",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-9538",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "5.40.1-6+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "perl-base",
+      "scanner_status": "fix_deferred",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-76642",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "util-linux",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78408",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "util-linux",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78409",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "util-linux",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "Debian Security Tracker",
+      "cve": "CVE-2026-78410",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "runtime",
+      "installed_version": "2.41.5-0+deb13u1",
+      "layer": {
+        "DiffID": "sha256:dd57f90311a2567b55ff22eeacff1602fd04ad7566e315957731359eab173b90",
+        "Digest": "sha256:37fb86c2a767b88d500c6872195f88078f64765fe0d2f9cc375cc2efbd4c0a41"
+      },
+      "observed": "candidate",
+      "package": "util-linux",
+      "scanner_status": "affected",
+      "target_type": "debian"
+    },
+    {
+      "advisory_source": "GitHub Security Advisory Go",
+      "cve": "CVE-2026-116587",
+      "disposition": "release_blocker",
+      "fixed_version": null,
+      "image": "proxy",
+      "installed_version": "v3.0.5",
+      "layer": {
+        "DiffID": "sha256:e4b7bce2525bf37f43df48cc28b1decab3234569f420b3b7139d50b5d009aef9",
+        "Digest": "sha256:6b642013a8ec92acaad5623a765da2a287b31a1bc0fc0b8390a7e52f0c26b613"
+      },
+      "observed": "candidate",
+      "package": "github.com/go-jose/go-jose/v3",
+      "scanner_status": "affected",
+      "target_type": "gobinary"
+    }
+  ],
+  "images": {
+    "baseline": {
+      "proxy": {
+        "config_digest": "sha256:4a8b2cd54c8d17bf61313c0ee38079358f4893f85918d81b64ca8828dc91fcfc",
+        "oci_digest": "sha256:2bd80e2de180a1df602df957d7b1e248fca3dfe383ca2bdc820d646bc2767762",
+        "report_id": "01a200ed-f96c-7c2e-b9f3-d2e44193fce0",
+        "report_sha256": "sha256:f09372dafffe94cc94476d3cc629cbc2cae0a6a29c758c7895acd146e42ca4c4",
+        "scan_at": "2026-11-22T01:45:25.612805189Z",
+        "secret_count": 0,
+        "summary": {
+          "CRITICAL": 0,
+          "HIGH": 2,
+          "LOW": 4,
+          "MEDIUM": 14,
+          "UNKNOWN": 1
+        }
+      },
+      "runtime": {
+        "config_digest": "sha256:e02fcc63d8775cd8bd2803314b73e996aa141c69f239da5533414a56c13ed8ee",
+        "oci_digest": "sha256:47247a52fde642b2ea74274ff6c4c2ce66321c65b5d9de212fe4cd70a5d8068f",
+        "report_id": "01a200ed-f0f9-7416-83e4-9b30c12d2508",
+        "report_sha256": "sha256:52e8eae5ed3944e7e10bd583d76f257392c918d8dae7746fa23106a8e3a8972a",
+        "scan_at": "2026-11-22T01:45:23.449274437Z",
+        "secret_count": 0,
+        "summary": {
+          "CRITICAL": 0,
+          "HIGH": 50,
+          "LOW": 81,
+          "MEDIUM": 100,
+          "UNKNOWN": 7
+        }
+      }
+    },
+    "candidate": {
+      "proxy": {
+        "config_digest": "sha256:63b22262de27b6bf4ee15844bff388dce0753e71bf83633a62d51864f801e160",
+        "oci_digest": "sha256:ada5136d46728be69104b98cb26500e32f453ce078d1485b50f5e154b47dfbe8",
+        "report_id": "01a20100-27bd-7e2a-9701-3cddb9d6a616",
+        "report_sha256": "sha256:f41b8f6d1e058bef744a711dcf4e2cca1426eb9e1b34dcb2c4df630eb75757c5",
+        "sbom": {
+          "id": "urn:uuid:fa22da31-1046-41e2-b1b2-57434a5240bb",
+          "sha256": "sha256:6add1f395f91d7f46644b25c0e4ebf27c4cc0743d9841d72c1fd0fd337f158c3"
+        },
+        "scan_at": "2026-11-22T02:05:17.117932566Z",
+        "secret_count": 0,
+        "summary": {
+          "CRITICAL": 0,
+          "HIGH": 1,
+          "LOW": 4,
+          "MEDIUM": 13,
+          "UNKNOWN": 1
+        }
+      },
+      "runtime": {
+        "config_digest": "sha256:d43ffcc0e574ae34c137fa647fe5ecaf535002b94ab1ebac68d3ede980f2863f",
+        "oci_digest": "sha256:4b08fd750a98a3baaaa9351e6b2fc2d49cb3469828f60d2bb4cda3b668c5a563",
+        "report_id": "01a200ff-e9e4-7bc7-bb1a-5c72f5c0590e",
+        "report_sha256": "sha256:e99229cc0e7a3fec427f0ea2c0e2f8b3a8cc60c02e00d788b77d478727ce079b",
+        "sbom": {
+          "id": "urn:uuid:59173018-baa7-4113-baf5-f2a925d45fb8",
+          "sha256": "sha256:bf77a3fe690fb66693b96671065b7275b62fc39339e5f5e17ced2b2caa6c3f8a"
+        },
+        "scan_at": "2026-11-22T02:05:01.28477546Z",
+        "secret_count": 0,
+        "summary": {
+          "CRITICAL": 0,
+          "HIGH": 50,
+          "LOW": 79,
+          "MEDIUM": 74,
+          "UNKNOWN": 7
+        }
+      }
+    }
+  },
+  "scanner": "Trivy 0.76.2",
+  "schema_version": 1
+}

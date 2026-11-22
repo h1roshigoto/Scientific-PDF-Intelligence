@@ -29,6 +29,30 @@ dataset, backup и Docker data-root. При project quotas дополнител�
 свободное место всего раздела. Соберите подтверждение действующих лимитов
 и тест отказа на изолированном разделе перед публичным запуском.
 
+На согласованном хосте соберите `uname -r`, `docker version`, `docker compose
+version` и `docker info --format '{{.DockerRootDir}} {{.CgroupVersion}}'`.
+Проверьте доступность `landlock` в `/sys/kernel/security/lsm`, затем выполните
+`container_check.py` на чистом стенде, чтобы подтвердить ABI и эффективную
+политику. На хосте проверьте разделы и ёмкость:
+
+```bash
+docker_root=$(docker info --format '{{.DockerRootDir}}')
+for path in /srv/spi/dataset /srv/spi/backups /srv/spi/proxy "$docker_root"; do
+  findmnt -T "$path" -o TARGET,SOURCE,FSTYPE,OPTIONS
+  df -hP "$path"
+  df -iP "$path"
+done
+sudo xfs_quota -x -c 'state' -c 'report -p -h' /srv/spi-storage
+```
+
+Для XFS используйте `prjquota` на предназначенном разделе, согласуйте
+уникальные project ID через `/etc/projects` и `/etc/projid`, затем примените
+`xfs_quota -x -c 'project -s spi-data' -c 'limit -p bsoft=18g bhard=20g spi-data' /srv/spi-storage`.
+Размеры в примере подбирает оператор. Запланируйте отдельные бюджеты для
+dataset, backups, Docker root и Caddy. Проверьте alert при 80% и 90% бюджета
+и отказ записи в disposable project на том же типе файловой системы.
+Тест ограниченного tmpfs не подтверждает квоты production-хоста.
+
 Если диск переполнен, остановите proxy, дождитесь остановки писателей,
 освободите место в соответствии с политикой хранения и проверьте backup.
 Ответ 507 `storage_full` диагностирует исчерпание tmpfs или Storage. Если
@@ -56,9 +80,14 @@ backup/restore. У каждого worker свой heartbeat, а активные
 берётся из текущих записей задач, а в Compose GigaChat выключен.
 
 Порог для idle heartbeat — 30 секунд, processing — deadline задачи + 15
-секунд. Отправляйте агрегаты и контейнерные статусы в систему мониторинга
-хоста. Настройте alerts на stalled worker, отсутствие samples, свободное
-место, нарушение окна backup, рост 5xx и возраст backlog. Старые метрики
+секунд. Сервис пишет JSON `code=alert` со состояниями `firing` и `resolved`.
+Готовые правила следят за API, worker, sandbox, очередью, processing, 5xx,
+login abuse, rate limits, диском, backup и restore. Периоды задаются через
+`SPI_BACKUP_MAX_AGE` и `SPI_RESTORE_MAX_AGE` в секундах. На хосте направьте
+JSON из `docker compose logs --no-log-prefix --follow monitoring` в локальный
+агент мониторинга и проверьте доставку предупреждения в согласованный receiver.
+Локальный E2E вызывает отказ backup при активном writer и проверяет запись
+alert в локальном приёмнике. Старые метрики
 остаются с предыдущим timestamp до следующей записи. Caddy не включает
 HTTP access/error request logs. API пишет UTC, correlation ID, статус и
 длительность, worker пишет только фиксированные диагностические коды и
@@ -68,7 +97,7 @@ HTTP access/error request logs. API пишет UTC, correlation ID, статус
 ## Обновить и откатить
 
 1. Сохраните точный image digest и исходный SHA. Создайте cold backup и
-   проверьте копию. Проверьте Compose config и соберите новый тег образов.
+   проверьте копию. Проверьте Compose config с новой парой OCI digest и выполните pull.
 2. Прочитайте release notes и проверьте новую версию с копией dataset.
    Текущий формат SQLite `user_version=0`. Миграции должны быть явными,
    версионированными и предварительно отрепетированными.

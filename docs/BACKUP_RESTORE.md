@@ -32,6 +32,45 @@ SQLite `user_version`, количество пользователей, PDF, job
 
 ## Шифрование и копии вне хоста
 
+P0 №32 добавляет проверяемый restic workflow с репозиторием версии 2.
+Храните ключ restic, ciphertext и исходный dataset в отдельных каталогах.
+Ограничьте доступ к plaintext staging, архивам, журналу и файлу пароля.
+На Windows ограничьте NTFS ACL учётной записью службы или оператора.
+
+```bash
+umask 077
+restic_args=(--repo /secure/spi-restic --password-file /secure/keys/spi-restic \
+  --scratch /secure/backup-scratch --report /secure/spi-restic-status.json)
+python -m spi.ops.encrypted_backup "${restic_args[@]}" init
+python -m spi.ops.encrypted_backup "${restic_args[@]}" backup /srv/spi/backups/rehearsal.tar
+python -m spi.ops.encrypted_backup "${restic_args[@]}" verify
+python -m spi.ops.encrypted_backup "${restic_args[@]}" restore "$SNAPSHOT_ID" /secure/rehearsal/snapshot.tar
+python -m spi.ops.encrypted_backup "${restic_args[@]}" retention --daily 7 --weekly 4 --monthly 12
+```
+
+Отчёт содержит время и размер последней копии, последнюю проверку данных,
+время и SHA-256 извлечённого TAR, признаки шифрования и план retention.
+Полная репетиция дополнительно выполняет `spi.ops.restore` и проверяет
+приложение с отдельным dataset. Локальный E2E проверяет отказ с неверным
+ключом и восстановление SHA-256 с правильным ключом.
+
+Перед использованием off-host назначьте одобренное хранилище и скопируйте
+ciphertext закрытого локального репозитория или настройте штатный `restic copy`.
+Проверьте восстановление из самого внешнего назначения. Политика wrapper
+планирует 7 daily, 4 weekly и 12 monthly, сохраняет два recovery points и
+отклоняет план, если теряется последнее восстановленное состояние. Для
+ручного удаления выполните свежий dry-run, проверьте выбранные snapshot ID
+и восстановление вне сервера. Автоматическое удаление отсутствует.
+
+Для ротации пароля добавьте новый ключ через `restic key add`, проверьте
+`check --read-data` и отдельный restore с новым ключом, затем удалите старый
+ключ через `restic key remove`. При компрометации master key создайте новый
+репозиторий и скопируйте проверенные snapshots. При потере всех пригодных
+ключей репозиторий не восстанавливается. Храните проверенную резервную
+копию ключа вне dataset и основного сервера.
+
+Ниже сохранён альтернативный ручной workflow age для ранее созданных копий.
+
 Запускайте проверенный cold backup ежедневно в согласованное окно и перед
 каждым обновлением. Контролируйте возраст последней успешной копии, объём и
 свободное место. Начальная политика — 7 ежедневных и 4 еженедельных архивов
@@ -66,7 +105,7 @@ Compose project name и файл конфигурации. Скопируйте 
 
 ```bash
 rehearsal=(docker compose -p spi-rehearsal --env-file /srv/spi-rehearsal/compose.env -f compose.yaml -f compose.production.yaml)
-"${rehearsal[@]}" build
+"${rehearsal[@]}" pull
 "${rehearsal[@]}" run --rm --no-deps restore spi-2026-11-22T0010Z --dry-run
 "${rehearsal[@]}" run --rm --no-deps restore spi-2026-11-22T0010Z
 ```

@@ -14,7 +14,7 @@ from spi.upload_store import private_path
 from .backup import archive_path, read_archive, sync_directory
 from .runtime import STATE
 from .state import cold_lock
-from .telemetry import event, snapshot
+from .telemetry import event, last_snapshot, snapshot
 
 
 def restore(source, destination=STATE, *, dry_run=False):
@@ -44,10 +44,12 @@ def main():
     os.umask(0o077)
     try:
         manifest = restore(archive_path(args.name), dry_run=args.dry_run)
-        snapshot("restore", {"last_result": "verified" if args.dry_run else "restored", "timestamp": time()})
+        previous = last_snapshot("restore")
+        field = "last_verify_timestamp" if args.dry_run else "last_restore_timestamp"
+        snapshot("restore", {**previous, field: time(), "last_result": "verified" if args.dry_run else "restored"})
         print(json.dumps(manifest, ensure_ascii=False, sort_keys=True))
     except (OSError, RuntimeError, ValueError, tarfile.TarError, sqlite3.Error, TypeError, KeyError, AttributeError) as exc:
-        snapshot("restore", {"last_result": "failed", "timestamp": time()})
+        snapshot("restore", {**last_snapshot("restore"), "last_result": "failed", "timestamp": time()})
         event("restore", "restore_failed", level="ERROR", error_type=type(exc).__name__)
         raise SystemExit(1) from None
 

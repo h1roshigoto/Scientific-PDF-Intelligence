@@ -9,11 +9,11 @@ import tarfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-SERVICES = {"api": 10001, "worker": 10001, "sandbox": 10001, "proxy": 10002}
+SERVICES = {"api": 10001, "worker": 10001, "sandbox": 10001, "proxy": 10002, "monitoring": 10001}
 ALLOWED_MOUNTS = {
     "api": {"/state-auth", "/state-tenants", "/coord", "/parser", "/metrics", "/local-secret", "/run/spi-auth-secret"},
     "worker": {"/state-auth", "/state-tenants", "/coord", "/parser", "/metrics", "/local-secret", "/run/spi-auth-secret"},
-    "sandbox": {"/parser"}, "proxy": {"/data", "/config"},
+    "sandbox": {"/parser"}, "proxy": {"/data", "/config"}, "monitoring": {"/metrics"},
 }
 SECRET = re.compile(rb"(?:-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{32,}|"
                     rb"AKIA[A-Z0-9]{16}|(?:SPI_AUTH_SECRET|GIGACHAT_CREDENTIALS)=[A-Za-z0-9_+/=-]{30,})")
@@ -41,20 +41,25 @@ def runtime(compose):
         mounts = {mount["Destination"]: mount for mount in config["Mounts"]}
         assert set(mounts) <= ALLOWED_MOUNTS[service] | {"/tmp"}, service
         assert all("docker.sock" not in str(mount) for mount in mounts.values()), service
+        assert host["RestartPolicy"]["Name"] == "unless-stopped", service
         if service != "proxy":
             assert not host["PortBindings"], service
             assert all(opt in host["Tmpfs"]["/tmp"] for opt in ("size=", "noexec", "nosuid", "nodev")), service
-            cap_script = (
-                "id -u; awk '/^(CapEff|CapBnd|NoNewPrivs|Seccomp):/{ print $2 }' /proc/self/status; "
-                "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max; ulimit -n"
-            )
-            values = docker("exec", name, "sh", "-ec", cap_script).splitlines()
-            assert values[:5] == [str(uid), "0000000000000000", "0000000000000000", "1", "2"], service
-            cpu_quota, cpu_period = map(int, values[5].split())
-            assert 0 < cpu_quota <= cpu_period and int(values[6]) == host["Memory"], service
-            assert int(values[7]) == host["PidsLimit"] and values[8] == "1024", service
-        if service in {"worker", "sandbox"}:
+        cap_script = (
+            "id -u; awk '/^(CapEff|CapBnd|NoNewPrivs|Seccomp):/{ print $2 }' /proc/self/status; "
+            "cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max "
+            "/sys/fs/cgroup/memory.swap.max; ulimit -n"
+        )
+        values = docker("exec", name, "sh", "-ec", cap_script).splitlines()
+        assert values[:5] == [str(uid), "0000000000000000", "0000000000000000", "1", "2"], service
+        cpu_quota, cpu_period = map(int, values[5].split())
+        assert cpu_quota * 1_000_000_000 == cpu_period * host["NanoCpus"], service
+        assert int(values[6]) == host["Memory"] and int(values[7]) == host["PidsLimit"], service
+        assert values[8:] == ["0", "1024"], service
+        if service in {"worker", "sandbox", "monitoring"}:
             assert host["NetworkMode"] == "none", service
+        if service == "monitoring":
+            assert mounts["/metrics"]["RW"] is False
         if service in {"api", "worker"}:
             assert mounts["/parser"]["RW"] is False
             secret = "/local-secret" if "/local-secret" in mounts else "/run/spi-auth-secret"
@@ -70,14 +75,29 @@ def runtime(compose):
     assert f"SPI_AUTH_TRUSTED_PROXIES={proxy_ip}" in api["Config"]["Env"]
     sandbox = inspected["sandbox"]["Id"]
     probe = """
-import errno, os, socket
+import errno, os, resource, socket
 from pathlib import Path
 from spi.ops.pdf_sandbox import restrict_child
-p = Path('/tmp/spi-boundary-probe')
-p.write_text('sample')
-restrict_child()
-assert p.read_text() == 'sample'
-for operation in (lambda: p.write_text('different'), lambda: socket.socket(socket.AF_UNIX), os.fork):
+base = Path('/tmp/spi-boundary-probe')
+base.mkdir()
+document = base / 'document'
+unrelated = base / 'unrelated'
+document.write_text('sample')
+unrelated.write_text('private')
+with (base / 'result').open('wb') as result:
+    restrict_child(document)
+    assert document.read_text() == 'sample'
+    result.write(b'allowed')
+assert resource.getrlimit(resource.RLIMIT_CPU) == (15, 15)
+assert resource.getrlimit(resource.RLIMIT_AS) == (384 * 1024**2,) * 2
+assert resource.getrlimit(resource.RLIMIT_FSIZE) == (16 * 1024**2,) * 2
+assert resource.getrlimit(resource.RLIMIT_NOFILE) == (64, 64)
+assert all(not Path(name).exists()
+           for name in ('/state-auth', '/state-tenants', '/run/spi-auth-secret', '/local-secret/auth'))
+actions = (unrelated.read_bytes, lambda: document.write_text('different'),
+           lambda: (base / 'new').touch(), document.unlink, lambda: document.rename(base / 'renamed'),
+           lambda: socket.socket(socket.AF_INET), os.fork, lambda: os.execl('/bin/true', 'true'))
+for operation in actions:
     try:
         operation()
     except OSError as exc:
@@ -86,13 +106,18 @@ for operation in (lambda: p.write_text('different'), lambda: socket.socket(socke
         raise AssertionError('PDF parser sandbox accepted a forbidden operation')
 """
     docker("exec", sandbox, "python", "-c", probe)
-    docker("exec", sandbox, "rm", "-f", "/tmp/spi-boundary-probe")
-    print("PASS single trusted proxy address, no parser sockets, process creation or filesystem writes")
+    docker("exec", sandbox, "sh", "-ec",
+           "cd /tmp/spi-boundary-probe; test \"$(cat document)\" = sample; "
+           "test \"$(cat unrelated)\" = private; test \"$(cat result)\" = allowed; "
+           "test ! -e new; test ! -e renamed; rm document unrelated result; rmdir /tmp/spi-boundary-probe")
+    print("PASS real Landlock, seccomp, parser rlimits, document-only reads and inherited result descriptor")
+    program = Path(__file__).with_name("pdf_sandbox_check.py").read_bytes()
+    subprocess.run(["docker", "exec", "-i", sandbox, "python", "-"], input=program, check=True)
     images = {config["Config"]["Image"]: config["Image"] for config in inspected.values()}
     for name, image_id in images.items():
         assert docker("image", "inspect", name, "--format", "{{.Id}}").strip() == image_id, (
             f"{name} changed since the containers were started")
-    return images
+    return images, api["Config"]["Image"]
 
 
 def scan_layers(images):
@@ -144,7 +169,29 @@ result = subprocess.run([sys.executable, '-c', 'buffer=bytearray(160*1024**2)'],
 assert result.returncode == -9 and kills() > before
 """
     docker("run", "--rm", *options, "--memory", "64m", "--memory-swap", "64m", image, "python", "-c", memory)
-    print("PASS disposable CPU throttling and cgroup OOM enforcement")
+    disk = """
+import os
+from pathlib import Path
+from spi.ops.state import disk_full
+from spi.storage import Store
+mount = Path('/limited')
+store = Store(mount)
+store.write('checkpoint.json', {'state': 'original'})
+with (mount / 'filler').open('xb') as filler:
+    stat = os.statvfs(mount)
+    os.posix_fallocate(filler.fileno(), 0, stat.f_bavail * stat.f_frsize)
+try:
+    store.write('checkpoint.json', {'state': 'new'})
+except OSError as exc:
+    assert disk_full(exc)
+else:
+    raise AssertionError('Capacity boundary was not enforced')
+assert store.read('checkpoint.json') == {'state': 'original'}
+assert set(p.name for p in mount.iterdir()) == {'filler', 'checkpoint.json'}
+"""
+    docker("run", "--rm", *options, "--tmpfs", "/limited:rw,noexec,nodev,nosuid,size=8m,uid=10001,gid=10001,mode=0700",
+           image, "python", "-c", disk)
+    print("PASS disposable CPU throttling, cgroup OOM and limited dataset ENOSPC preserving checkpoint")
 
 
 def main():
@@ -157,10 +204,10 @@ def main():
     compose = ["compose", "-p", args.project, "-f", "compose.yaml", "-f", f"compose.{args.profile}.yaml"]
     if args.env_file:
         compose.extend(("--env-file", args.env_file))
-    images = runtime(compose)
+    images, api_image = runtime(compose)
     if args.layers:
         scan_layers(images)
-        exercise_limits(next(image for image in images if image.startswith("spi-runtime:")))
+        exercise_limits(api_image)
 
 
 if __name__ == "__main__":
