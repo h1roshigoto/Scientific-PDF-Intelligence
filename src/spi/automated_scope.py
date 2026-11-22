@@ -221,7 +221,10 @@ def atomic_save(path: Path, data: dict) -> None:
 
 def _machine_records(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("policy") != POLICY or not isinstance(data.get("records"), list):
+    if (not isinstance(data, dict) or data.get("policy") != POLICY
+            or data.get("rag_demo_criterion") != RAG_DEMO_CRITERION
+            or not isinstance(data.get("model"), str) or not data["model"].strip()
+            or not isinstance(data.get("records"), list)):
         raise ValueError("Invalid machine-scope manifest")
     return data
 
@@ -244,12 +247,15 @@ def machine_decisions(path: Path, root: Path, docs: dict, sheet: dict) -> dict:
         original = pdf_for(row, root)
         if Path(doc["file_path"]).resolve() != original:
             raise ValueError(f"{key}: model decision is not for registered PDF")
-        if record.get("status") not in FINAL:
+        if not isinstance(record.get("status"), str) or record["status"] not in FINAL:
             continue
         pages = extract_pages(original)
         status, source_pages = verified_decision(record, pages)
         if status != record["status"] or source_pages != record.get("source_pages"):
             raise ValueError(f"{key}: machine decision failed independent evidence verification")
+        expected_reason = "Two independent Codex scope reviews: " + record["passes"][0]["reason"].strip()
+        if record.get("reason") != expected_reason:
+            raise ValueError(f"{key}: machine rationale differs from model evidence")
         decisions[key] = PublicationScope(
             document_id=key, pdf_sha256=doc["sha256"], status=status,
             reason=record["reason"], source_pages=source_pages,
@@ -275,6 +281,10 @@ def main(argv=None):
     parser.add_argument("--retry-unresolved", action="store_true")
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    if args.limit < 0 or args.timeout <= 0:
+        parser.error("--limit must be nonnegative and --timeout positive")
+    if args.output.resolve() in {args.queue.resolve(), args.approval.resolve()}:
+        parser.error("--output cannot overwrite the original approval or review queue")
     queue, sheet = read_queue(args.queue), read_approval(args.approval)
     if set(queue) != set(sheet):
         parser.error("Queue and approval worksheet differ")
@@ -282,7 +292,8 @@ def main(argv=None):
         if any(row[field] != queue[key][field] for field in IDENTITY):
             parser.error(f"{key}: approval row has changed PDF identity")
     manifest = _machine_records(args.output) if args.output.exists() else {
-        "policy": POLICY, "model": args.model, "records": [],
+        "policy": POLICY, "model": args.model,
+        "rag_demo_criterion": RAG_DEMO_CRITERION, "records": [],
     }
     if manifest.get("model") != args.model:
         parser.error("Manifest belongs to a different model; use a different --output path")
@@ -291,7 +302,8 @@ def main(argv=None):
         parser.error("Duplicate IDs in existing manifest")
     new = 0
     for key, row in sheet.items():
-        if (key in prior and not (args.retry_unresolved and prior[key]["status"] == "needs_review")):
+        if (key in prior and prior[key].get("pdf_sha256") == row["pdf_sha256"]
+                and not (args.retry_unresolved and prior[key]["status"] == "needs_review")):
             continue
         if args.limit and new >= args.limit:
             break
