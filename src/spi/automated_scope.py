@@ -6,6 +6,7 @@ The output is a separate, SHA-bound machine manifest, not a human approval CSV.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from time import perf_counter
 import unicodedata
 
 import pymupdf
@@ -183,16 +185,46 @@ def pdf_for(row: dict, root: Path) -> Path:
     return path
 
 
-def audit_one(row: dict, root: Path, model: str, timeout: int) -> dict:
+def _timed_codex(prompt: str, model: str, timeout: int) -> tuple[dict, int]:
+    started = perf_counter()
+    result = call_codex(prompt, model, timeout)
+    return result, round((perf_counter() - started) * 1000)
+
+
+def audit_one(row: dict, root: Path, model: str, timeout: int, *, parallel: bool = True) -> dict:
+    """Two independently grounded reviews, concurrent by default, with safe abstention."""
+    started = perf_counter()
     record = {
         "document_id": row["document_id"], "pdf_sha256": row["pdf_sha256"],
         "status": "needs_review", "reason": "", "source_pages": [], "passes": [],
+        "timing_ms": {},
     }
     try:
+        parse_started = perf_counter()
         pages = extract_pages(pdf_for(row, root))
-        # Separate ephemeral Codex sessions; the second pass never sees the first.
-        first = call_codex(_prompt(row, pages, skeptical=False), model, timeout)
-        second = call_codex(_prompt(row, pages, skeptical=True), model, timeout)
+        record["timing_ms"]["pdf_read"] = round((perf_counter() - parse_started) * 1000)
+        record["pdf_text_chars"] = sum(len(page) for page in pages.values())
+        first_prompt = _prompt(row, pages, skeptical=False)
+        second_prompt = _prompt(row, pages, skeptical=True)
+        # Each call has a separate ephemeral read-only Codex process and output directory.
+        # Their input prompts and model context are independent; no review sees the other.
+        if parallel:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_job = pool.submit(_timed_codex, first_prompt, model, timeout)
+                second_job = pool.submit(_timed_codex, second_prompt, model, timeout)
+                first, first_ms = first_job.result()
+                second, second_ms = second_job.result()
+        else:
+            first, first_ms = _timed_codex(first_prompt, model, timeout)
+            # A final positive/negative decision needs both passes. If the first
+            # cannot be citation-verified, a second model call cannot make it final.
+            if checked_pass(first, pages) is None:
+                record["passes"] = [first]
+                record["timing_ms"]["first_pass"] = first_ms
+                record["reason"] = "First pass lacks verifiable evidence; second pass skipped"
+                return record
+            second, second_ms = _timed_codex(second_prompt, model, timeout)
+        record["timing_ms"].update(first_pass=first_ms, second_pass=second_ms)
         record["passes"] = [first, second]
         record["status"], record["source_pages"] = verified_decision(record, pages)
         if record["status"] in FINAL:
@@ -201,6 +233,8 @@ def audit_one(row: dict, root: Path, model: str, timeout: int) -> dict:
             record["reason"] = "Model disagreement, insufficient evidence, or invalid PDF quote"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         record["reason"] = f"Unresolved: {error}"
+    finally:
+        record["timing_ms"]["total"] = round((perf_counter() - started) * 1000)
     return record
 
 
@@ -279,6 +313,8 @@ def main(argv=None):
     parser.add_argument("--limit", type=int, default=0, help="Process at most N new documents; 0 means all")
     parser.add_argument("--timeout", type=int, default=480, help="Seconds per Codex call")
     parser.add_argument("--retry-unresolved", action="store_true")
+    parser.add_argument("--sequential-passes", action="store_true",
+                        help="Disable two concurrent Codex calls if the account is rate-limited")
     args = parser.parse_args(argv)
     root = args.root.resolve()
     if args.limit < 0 or args.timeout <= 0:
@@ -307,12 +343,14 @@ def main(argv=None):
             continue
         if args.limit and new >= args.limit:
             break
-        record = audit_one(row, root, args.model, args.timeout)
+        record = audit_one(row, root, args.model, args.timeout,
+                           parallel=not args.sequential_passes)
         prior[key] = record
         manifest["records"] = list(prior.values())
         atomic_save(args.output, manifest)
         new += 1
-        print(f"{key}: {record['status']} ({len(record['source_pages'])} evidence pages)", flush=True)
+        print(f"{key}: {record['status']} ({len(record['source_pages'])} evidence pages; "
+              f"{record['timing_ms']['total'] / 1000:.1f}s", flush=True)
     counts = {status: sum(r["status"] == status for r in prior.values())
               for status in ("in_scope", "out_of_scope", "needs_review")}
     print(json.dumps({"processed": len(prior), "new": new, "counts": counts,
