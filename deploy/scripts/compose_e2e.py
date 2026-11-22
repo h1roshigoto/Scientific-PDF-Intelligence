@@ -9,7 +9,7 @@ import ssl
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, suppress
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex, token_urlsafe
@@ -717,7 +717,15 @@ def main():
             assert missing_tls.returncode and any(key in missing_tls.stderr for key in (
                 "SPI_PUBLIC_DOMAIN", "SPI_PUBLIC_ORIGIN", "SPI_AUTH_ALLOWED_ORIGINS",
             ))
-            scenario(primary, restored, directory, browser=args.browser, encrypted=args.encrypted)
+            try:
+                scenario(primary, restored, directory, browser=args.browser, encrypted=args.encrypted)
+            except (AssertionError, OSError, subprocess.SubprocessError):
+                for compose in (primary, restored):
+                    with suppress(AssertionError, OSError, subprocess.SubprocessError):
+                        lines = compose.run("logs", "--no-log-prefix", "--tail", "10", "monitoring")
+                        if lines:
+                            print(lines, file=sys.stderr)
+                raise
     finally:
         # Project names and volumes are generated only for this test invocation.
         restored.run("down", "-v")

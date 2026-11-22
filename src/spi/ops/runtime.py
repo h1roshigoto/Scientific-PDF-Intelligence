@@ -27,6 +27,8 @@ STATE = DATASET / "state"
 
 
 def initialize():
+    if not os.access(METRICS, os.R_OK | os.W_OK | os.X_OK):
+        raise OSError("metrics_storage_unavailable")
     private_path(DATASET, Path("coord"), directory=True).mkdir(mode=0o700, exist_ok=True)
     with cold_lock(DATASET / "coord", exclusive=False, create=True):
         for relative in ("state/auth", "state/tenants"):

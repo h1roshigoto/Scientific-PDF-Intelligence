@@ -60,7 +60,7 @@ services:
     <<: *runtime
     network_mode: none
     command: [python, -m, spi.ops.runtime, initialize]
-    volumes: [dataset:/dataset]
+    volumes: [dataset:/dataset, metrics:/metrics]
 
   api:
     <<: *runtime
@@ -201,8 +201,8 @@ services:
     <<: *runtime
     command: [python, -m, spi.ops.runtime, monitor]
     network_mode: none
-    mem_limit: 128m
-    memswap_limit: 128m
+    mem_limit: 192m
+    memswap_limit: 192m
     cpus: 0.25
     environment:
       SPI_DISK_MIN_FREE_BYTES: ${SPI_DISK_MIN_FREE_BYTES:-134217728}
@@ -212,6 +212,11 @@ services:
     depends_on:
       initialize: {condition: service_completed_successfully}
     restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -c, "from os import stat; from time import time; raise SystemExit(time() - stat('/tmp/spi-monitor-sample').st_mtime > 45)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
 
 networks:
   edge:

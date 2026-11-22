@@ -1,5 +1,6 @@
 """Evaluate aggregate local deployment alerts and emit state transitions."""
 
+from pathlib import Path
 from time import time
 
 from spi.upload_store import _positive_limit
@@ -7,6 +8,7 @@ from spi.upload_store import _positive_limit
 from .telemetry import event, last_snapshot
 
 PERIOD = 15
+HEARTBEAT = Path("/tmp/spi-monitor-sample")
 
 
 def alerts(samples, workers, previous, now, started):
@@ -56,5 +58,6 @@ def monitor(sleep, current_workers):
         event("monitoring", "sample", active_workers=len(workers),
               worker_state="processing" if "processing" in workers else "idle" if workers else "stalled",
               **samples)
+        HEARTBEAT.touch()
         previous, firing = samples["api"], current
         sleep(PERIOD)
