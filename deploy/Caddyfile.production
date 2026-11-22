@@ -1,0 +1,20 @@
+{
+	admin off
+	log {
+		exclude http.log.error http.log.access
+	}
+	servers {
+		strict_sni_host on
+		timeouts {
+			read_header 10s
+			read_body 90s
+			idle 60s
+		}
+	}
+}
+
+import Caddyfile
+
+{$SPI_SITE} {
+	import spi
+}

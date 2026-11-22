@@ -12,6 +12,7 @@ from io import StringIO
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from . import __version__
+from .pdf_boundary import ParserUnavailable
 from .review_models import ReviewBasis
 from .upload_export_models import (
     CSV_FORMAT, DEFAULT_EXPORT_BYTES, MANIFEST, MEMBERS, ROOT, AuditEvent, CurrentReview, ExportArtifact,
@@ -64,6 +65,8 @@ def _verified_original(uploads, upload):
                 raise ReviewError(409, "upload_export_pdf_changed")
             if _pdf_pages(path) != upload.page_count or _signature(os.fstat(stream.fileno())) != _signature(original):
                 raise ReviewError(409, "upload_export_pdf_changed")
+    except ParserUnavailable:
+        raise
     except (OSError, InvalidPdf) as exc:
         raise ReviewError(409, "upload_export_pdf_changed") from exc
     return path, _signature(path_stat)

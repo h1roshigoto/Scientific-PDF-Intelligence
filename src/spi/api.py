@@ -1,15 +1,17 @@
 """Scientific read API and private PDF uploads."""
 import logging
 import os
+import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
-from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from .auth_api import SecurityMiddleware, install_auth
-from .auth_config import AuthConfig, auth_mode
+from .auth_config import AuthConfig, auth_mode, flag
 from .config import load_project_env
 from .project_passport import (
     AmbiguousPublication, PublicationNotFound, passport_filename, render_project_passport,
@@ -134,6 +136,25 @@ def create_app():
             expose_headers=["X-SPI-Upload-Max-Bytes", "X-SPI-Snapshot-SHA256", "Content-Disposition", "Retry-After"],
         )
         app.add_middleware(SecurityMiddleware, config=config)
+        if flag("SPI_DEPLOYMENT"):
+            from .ops.runtime import auth_ready
+            from .ops.telemetry import RequestMetrics
+
+            # Deployment owns a fixed-size tmpfs. Keep tempfile from trying
+            # fallback mount points when it fills during multipart spooling.
+            tempfile.tempdir = "/tmp"
+
+            @app.get("/__ops/ready", include_in_schema=False)
+            def readiness(request: Request):
+                if request.client is None or request.client.host != "127.0.0.1":
+                    raise HTTPException(404, "not_found")
+                try:
+                    auth_ready(config)
+                except (OSError, sqlite3.Error, ValueError):
+                    return JSONResponse({"status": "unavailable"}, status_code=503)
+                return {"status": "ready"}
+
+            app.add_middleware(RequestMetrics)
     else:
         app.include_router(official_router)
         app.add_api_route("/auth/config", lambda: JSONResponse(

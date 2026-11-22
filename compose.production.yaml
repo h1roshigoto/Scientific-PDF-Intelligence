@@ -1,0 +1,49 @@
+x-production-env: &production-env
+  SPI_DEPLOYMENT_PROFILE: production
+  SPI_PUBLIC_DOMAIN: ${SPI_PUBLIC_DOMAIN:?Set SPI_PUBLIC_DOMAIN}
+  SPI_PUBLIC_ORIGIN: ${SPI_PUBLIC_ORIGIN:?Set SPI_PUBLIC_ORIGIN}
+  SPI_AUTH_ALLOWED_ORIGINS: ${SPI_AUTH_ALLOWED_ORIGINS:?Set SPI_AUTH_ALLOWED_ORIGINS}
+  SPI_AUTH_SECRET_FILE: /run/spi-auth-secret
+
+x-secret: &secret
+  type: bind
+  source: ${SPI_HOST_AUTH_SECRET_FILE:?Set SPI_HOST_AUTH_SECRET_FILE}
+  target: /run/spi-auth-secret
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  api:
+    environment: *production-env
+    volumes:
+      - *secret
+  worker:
+    environment: *production-env
+    volumes:
+      - *secret
+  proxy:
+    command: [caddy, run, --config, /etc/caddy/Caddyfile.production, --adapter, caddyfile]
+    environment:
+      SPI_SITE: ${SPI_PUBLIC_DOMAIN:?Set SPI_PUBLIC_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+volumes:
+  dataset:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SPI_HOST_DATASET:?Set SPI_HOST_DATASET}
+  backups:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SPI_HOST_BACKUPS:?Set SPI_HOST_BACKUPS}
+  proxy-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SPI_HOST_PROXY_DATA:?Set SPI_HOST_PROXY_DATA}

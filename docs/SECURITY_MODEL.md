@@ -39,7 +39,7 @@ independent of the account schema.
 | Cross-tenant IDOR | A separate Store per user and a shared ownership layer for reads, processing, reviews and exports. The worker checks upload identity, and the browser binds requests to the current session ID. | HTTP isolation tests cover public routes, resource reads, review changes, download variants and stale session bindings. Browser E2E exercises Alice and Bob in the same tab. |
 | Directory traversal, symlink, junction and hard-link abuse | Generated file paths, disjoint data roots and checks of path components, SQLite sidecars and regular-file link counts. | Path tests cover aliases and hard links. ACLs must prevent concurrent path replacement by untrusted local processes. |
 | SQL injection and diagnostics | Bound SQLite values, validation of IDs, sanitized error codes, redacted validation bodies and private responses with no-store. | HTTP tests use malformed identifiers and invalid fields. Process and proxy logs must exclude cookies, secrets, request bodies and sensitive query strings. |
-| Malicious PDF and resource exhaustion | Streaming byte limits, PDF signature and structural checks, bounded exports, storage and queue quotas, model and export budgets and process-owned worker slots. | PyMuPDF parses uploads and checks export/review evidence in the API as well as extracting in the worker. SHA-256 verifies identity. Production must constrain both parsing surfaces. |
+| Malicious PDF and resource exhaustion | Streaming byte limits, a networkless Compose parser, bounded exports, quotas, model and export budgets and process-owned worker slots. | Compose delegates all original-document parsing. SHA-256 verifies identity. Standalone private mode uses the original in-process parser. |
 | Concurrent quota bypass and ZIP abuse | Per-tenant SQLite write transactions for upload count, original PDF bytes, queue depth and retries. Shared windows for upload, review, export and model calls. Snapshot checks bind all requested export formats to the same revision. | Concurrent upload and enqueue tests, independent processes, quota and export rate tests. Disk quotas outside the app must cover results, logs, staging and proxy buffers. |
 | Stolen invitation | Random expiring code, only its hash persisted, atomic redemption. Bootstrap and issue operations use local CLI, and issuance requires an active administrator. | Tests exercise expiry, races and replay. A stolen unused code can register an unverified email before expiry. Distribute it privately. |
 | Unauthorized scientific review | Account-scoped Store, review revisions and separate authenticated actor audit. | Tests check review writes on foreign resources, preserved historical decisions and offline archive validation. User review is separate from the official scientific release. |
@@ -51,64 +51,54 @@ conflicts, content SHA-256, append-only audit history and unchanged snapshot
 hash. Password hashing uses the Argon2id defaults of the installed
 `argon2-cffi` package. [Argon2 documentation](https://argon2-cffi.readthedocs.io/en/25.1.0/howto.html)
 
-## Production
+## Compose deployment
 
-Before accepting public traffic, complete these infrastructure checks.
+Caddy terminates TLS, serves static assets, overwrites forwarded IP and
+protocol from the immediate connection, removes `Forwarded`, and preserves
+`Host` for the allowlist check. Only its configured IPv4 address is trusted.
+Uvicorn disables proxy header processing and access logs. Caddy uses a
+dedicated internal backend network and disables HTTP request logs. HTML
+and API responses use no-store. The frontend CSP permits same-origin
+scripts, workers and connections, inline styles, and blob image or worker
+resources. The proxy includes HSTS, framing protection, no-referrer and
+nosniff. The local CA and automated public ACME are separate configurations.
+See [Deployment](DEPLOYMENT.md).
 
-1. Serve a single HTTPS origin for the React build and `/api/`. Use a valid
-   certificate and restrict the backend listener to loopback or a private network.
-   Configure the proxy to overwrite forwarded headers with its directly
-   observed client IP and protocol. List each immediate trusted proxy IP
-   in `SPI_AUTH_TRUSTED_PROXIES`. Start Uvicorn with
-   `--no-proxy-headers --no-access-log` so application trust rules see its
-   immediate peer. Test TLS, HSTS, browser cookies, proxy header handling and
-   unauthorized origins end to end.
-2. Run the API and PDF worker without administrator privileges. Establish
-   OS-level isolation for PDF parsing and processing, restricted filesystem
-   mounts, low privileges, CPU, memory, disk, wall time and process limits.
-   Use an appropriate sandbox or container policy for both the upload
-   validation and the extraction surfaces. A separate worker process gives
-   application isolation through verified paths. The current worker service
-   identity can still read the configured tenant root.
-3. Restrict network egress to endpoints necessary for the enabled
-   configuration, including GigaChat only when enabled. The host filesystem
-   must be local and provide reliable SQLite locks across processes. Apply
-   OS disk quotas to originals, queues, processing, temporary files and ZIP
-   generation. Budget upload connections and body sizes at the proxy.
-4. Restore a tested backup of the account database and tenant root, rehearse
-   revocation after restore and document recovery from a corrupt tenant Store.
-   Monitor abuse, worker backlog, failures, disk exhaustion and backups
-   without logging secrets or private scientific data. The current app has
-   no email verification, password recovery or hardened PDF sandbox.
+### PDF parsing surfaces
 
-For example, an HTTPS nginx server can map the prefix to a loopback Uvicorn
-listener with this location block. Set the server name in
-`SPI_AUTH_ALLOWED_ORIGINS` and set the actual proxy IP in
-`SPI_AUTH_TRUSTED_PROXIES`. Set the proxy request body limit to the deployment
-maximum PDF size plus multipart overhead, accounting for user overrides.
-[nginx proxy directive reference](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
+| Path | Compose execution |
+| --- | --- |
+| Upload validation, `upload_store._pdf_pages` | The networkless service checks document type, encryption, repair status and page count |
+| Human review source, `upload_reviews._check_page` | The service returns page count and whether the selected page has text |
+| Private export, `upload_export._verified_original` | The API verifies SHA-256 and delegates PDF structure through `_pdf_pages`; the passport renderer creates a new PDF |
+| Worker batch extraction, `batch._process` | The service runs unchanged page and table extraction; the worker validates the JSON layout and runs scientific checks, checkpoints and publication |
+| Browser evidence | PDF.js renders the authorized original in the browser under CSP |
+| Standalone GigaChat and official/private CLIs | These remain operator-controlled and outside the Compose request path |
 
-```nginx
-location /api/ {
-    proxy_pass http://127.0.0.1:8000/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    client_max_body_size 26m;
-    access_log off;
-}
-```
+The sandbox container has no IP network, auth DB, tenant Store, model
+credentials, or Docker socket. It receives document bytes and a bounded
+operation through one Unix socket. It serializes requests, places one input
+document in tmpfs, and starts a fresh parser child. Each child has a
+seccomp syscall allowlist, Landlock restrictions on filesystem writes,
+15 seconds CPU, 20 seconds wall time, 384 MiB address space and a
+16 MiB output limit. The container additionally caps RAM and PIDs. The
+parent discards the parser diagnostic streams. The caller independently
+validates reply types, page indices and evidence. The parser child policy
+is required at startup, including on Linux environments running Docker
+Desktop. The worker deadline is 240 seconds.
 
-Serve only the React build distribution and its intended static files.
-Set frontend headers including `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer`, `X-Frame-Options: DENY` and a frontend CSP.
-Start with the following policy and verify PDF.js and downloads in the
-deployed browser. Send `Cache-Control: no-store` for the app HTML.
+The operator and kernel remain trusted. The parser uses a shared process
+service and its OS limits also bound document size, page count and throughput.
+A hostile PDF can make its own result unavailable, consume one parser
+slot until timeout or return fabricated text under compromise. Human
+review and application checks still apply. The worker and API share full
+tenant storage and auth DB by design. Their scientific JSON processing
+remains a trusted application surface and receives bounded data from the
+separate parser. GigaChat is disabled in Compose. Enabling external
+inference requires an independently reviewed worker egress and secret
+configuration with the same parser boundary. Public deployment requires
+verification of the sandbox on the actual host.
 
-```text
-default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'
-```
-
-Production TLS, OS sandbox policies, backups and operational monitoring are
-deployment work. Local HTTP mode is opt-in and accepts loopback origins
-and clients only.
+The production gate also requires a public TLS smoke, host disk controls,
+monitoring, scans and a separate restore rehearsal. See
+[Production readiness](PRODUCTION_READINESS.md).

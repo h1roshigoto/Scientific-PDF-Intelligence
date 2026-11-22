@@ -459,3 +459,68 @@ pnpm.cmd test:e2e
 | Источник возвращает 404 или не читается | Проверьте точный `document_id`, доступность сохранённого `file_path` и открытие оригинального файла. Если Store перенесли на другую машину, старые абсолютные пути могут быть недоступны. |
 | Вместо CSV приходит HTML или 404 | После разрешённой публикации проверяйте каждый URL `<VITE_CSV_ARTIFACT_BASE>/<solar или rag>/<имя>.csv`. Ожидаются заголовок CSV и содержимое UTF-8. До публикации оставьте переменную незаданной. |
 | pytest заканчивается ошибкой доступа к `pytest-current` | Используйте отдельную папку `python -m pytest -q --basetemp (Join-Path ([System.IO.Path]::GetTempPath()) ('spi-pytest-' + [guid]::NewGuid()))`. |
+# Docker Desktop. Локальная production-сборка
+
+Запустите Docker Desktop с Linux containers и откройте PowerShell 7 в корне
+репозитория. Docker Engine должен поддерживать Landlock ABI 3 и cgroup v2.
+Compose использует отдельные volumes для синтетического стенда.
+
+```powershell
+docker compose version
+docker compose -f compose.yaml -f compose.local.yaml config
+docker compose -f compose.yaml -f compose.local.yaml build
+docker compose -f compose.yaml -f compose.local.yaml up -d --wait
+docker compose -f compose.yaml -f compose.local.yaml ps
+docker compose -f compose.yaml -f compose.local.yaml logs --tail 100
+```
+
+Скопируйте CA этого Compose-проекта для проверки TLS. Используйте его в
+выделенном тестовом профиле или отдельном клиенте. На машине с пользовательскими
+данными не добавляйте тестовый CA в общий trust store.
+
+```powershell
+$spiCa = Join-Path ([System.IO.Path]::GetTempPath()) 'spi-compose-local-ca.crt'
+docker compose -f compose.yaml -f compose.local.yaml cp proxy:/data/caddy/pki/authorities/local/root.crt $spiCa
+curl.exe --fail --cacert $spiCa https://localhost:8443/api/health
+docker compose -f compose.yaml -f compose.local.yaml exec api python -m spi.auth_cli bootstrap-admin --email operator@example.test --display-name Operator
+docker compose -f compose.yaml -f compose.local.yaml exec api python -m spi.auth_cli invite --admin-email operator@example.test
+```
+
+Откройте [Документы](https://localhost:8443/documents) в тестовом браузере
+с доверием этому локальному CA. Нажмите «У меня есть приглашение»,
+зарегистрируйте тестовый аккаунт и войдите. Загрузите синтетический PDF,
+выберите Solar или RAG, нажмите «Начать анализ», проверьте evidence и
+подтвердите только проверенную запись. На странице результатов скачайте ZIP.
+`python -m spi.upload_export_verify file.zip` проверяет архив автономно.
+
+Cold backup и restore в отдельный локальный проект. Для первого прогона
+используйте новые и уникальные имена проекта и backup. Команды
+сохраняют volumes при остановке.
+
+```powershell
+$env:SPI_LOCAL_BACKUP_VOLUME = 'spi-demo-rehearsal-copies'
+$spiLocal = @('-f', 'compose.yaml', '-f', 'compose.local.yaml')
+docker compose @spiLocal up -d --wait
+docker compose @spiLocal stop proxy worker api
+docker compose @spiLocal run --rm --no-deps backup create rehearsal
+docker compose @spiLocal run --rm --no-deps backup verify rehearsal
+docker compose @spiLocal down
+docker compose -p spi-demo-restored @spiLocal run --rm --no-deps restore rehearsal --dry-run
+docker compose -p spi-demo-restored @spiLocal run --rm --no-deps restore rehearsal
+docker compose -p spi-demo-restored @spiLocal up -d --wait
+docker compose -p spi-demo-restored @spiLocal ps
+```
+
+Для восстановленного проекта скопируйте его CA и снова войдите.
+Проверьте оригинал, результаты, review history, экспорт и второй аккаунт.
+Остановите проекты с `docker compose … down`. **`docker compose down -v`
+удаляет volumes и не должен использоваться на production данных без
+проверенного backup и осознанного решения.**
+
+Автоматическая проверка на одноразовых Compose projects, где скрипт удаляет
+только созданные им тестовые volumes.
+
+```powershell
+python -m pip install -e '.[dev]'
+python deploy/scripts/compose_e2e.py --build
+```

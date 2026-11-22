@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.requests import ClientDisconnect
 
+from .auth_config import flag
 from .auth_models import AccountSession, SECRET, USER_ID, Credentials, PasswordChange, Registration, User, normalized_email
 from .auth_store import AuthError, AuthStore, Session
 from .tenant_storage import DAY, tenant_lease, tenant_queue, tenant_store, worker_slot
@@ -92,11 +93,15 @@ class SecurityMiddleware:
     def __init__(self, app, config):
         self.app = app
         self.config = config
+        self.deployed = flag("SPI_DEPLOYMENT")
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         request = Request(scope, receive)
+        if (self.deployed and scope["path"] == "/__ops/ready"
+                and request.client and request.client.host == "127.0.0.1"):
+            return await self.app(scope, receive, send)
         started = False
 
         async def secure_send(message):

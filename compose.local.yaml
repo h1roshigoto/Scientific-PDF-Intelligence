@@ -1,0 +1,31 @@
+x-local-env: &local-env
+  SPI_AUTH_ALLOWED_ORIGINS: https://localhost:${SPI_LOCAL_PORT:-8443}
+  SPI_PUBLIC_ORIGIN: https://localhost:${SPI_LOCAL_PORT:-8443}
+  SPI_AUTH_SECRET_FILE: /local-secret/auth
+  SPI_DEPLOYMENT_PROFILE: local
+
+services:
+  initialize:
+    environment:
+      SPI_AUTH_SECRET_FILE: /local-secret/auth
+    volumes:
+      - local-secret:/local-secret
+  api:
+    environment: *local-env
+    volumes:
+      - local-secret:/local-secret:ro
+  worker:
+    environment: *local-env
+    volumes:
+      - local-secret:/local-secret:ro
+  proxy:
+    command: [caddy, run, --config, /etc/caddy/Caddyfile.local, --adapter, caddyfile]
+    environment:
+      SPI_SITE: https://localhost:${SPI_LOCAL_PORT:-8443}
+    ports:
+      - "127.0.0.1:${SPI_LOCAL_PORT:-8443}:${SPI_LOCAL_PORT:-8443}"
+
+volumes:
+  local-secret: {}
+  backups:
+    name: ${SPI_LOCAL_BACKUP_VOLUME:-${COMPOSE_PROJECT_NAME}_backups}

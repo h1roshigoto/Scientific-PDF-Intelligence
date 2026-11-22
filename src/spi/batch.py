@@ -15,15 +15,17 @@ from pydantic import ValidationError
 from .batch_checks import quality_gate, validate_results
 from .batch_evidence import (
     MODEL_PLAN_VERSION, PROFILES, SCHEMA_VERSIONS, SUPPLEMENT, Reply, TableValueMismatch, make_prompt, model_fragments,
-    link_table_context, offline_proposals, relevant, unresolved_table_cells, verify,
+    link_table_context, offline_proposals, unresolved_table_cells, verify,
 )
-from .batch_pdf import LAYOUT_VERSION, page_fragments
+from .batch_pdf import LAYOUT_VERSION
 from .gigachat import (
     DEFAULT_COMPLETION_MAX_TOKENS, Completion, GigaChatClient, GigaChatError, completion_diagnostics, is_ultra,
 )
 from .gigachat_evidence import EvidenceError
 from .models import PublicationScope, ResultRecord
-from .pdf import parse_pdf
+from .ops.state import disk_full
+from .pdf_boundary import ParserUnavailable
+from .pdf_layout import read_layout
 from .storage import Store
 
 
@@ -227,7 +229,7 @@ def _plan_model_fragments(fragments, saved):
     return planned
 
 
-def _process(store, path, domain, generation, previous, *, prioritize_cell=None, content=None):
+def _process(store, path, domain, generation, previous, *, prioritize_cell=None, content=None, layout_reader=read_layout):
     pid = f"{domain}:{path.stem}"
     record = {"document_id": pid, "path": str(path), "domain": domain,
               "status": "running", "sha256": None, "page_count": None, "pages": [],
@@ -254,16 +256,7 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
         record.update(sha256=digest, revision=revision, status="running", parser_version=LAYOUT_VERSION,
                       profile=PROFILES[domain], schema_version=schema_version, mode=mode, errors=[])
         _checkpoint(store, record)
-        fragments, layout_issues = [], []
-        previous_captions = {}
-
-        def inspect_page(page, blocks):
-            units, unresolved = page_fragments(page, blocks, lambda text: relevant(text, domain),
-                                               previous_captions=previous_captions, row_metrics=domain == "rag")
-            fragments.extend(units)
-            layout_issues.extend(unresolved)
-
-        metadata, pages = parse_pdf(path, domain, content=content, inspect_page=inspect_page)
+        metadata, pages, fragments, layout_issues = layout_reader(path, domain, content)
         fragments = list(link_table_context(fragments, pages, domain))
         for issue in layout_issues:
             issue["pdf_sha256"] = digest
@@ -338,13 +331,15 @@ def _process(store, path, domain, generation, previous, *, prioritize_cell=None,
             or not results or any(f["status"] == "review" for f in record["fragments"].values())
         ) else "processed"
     except (OSError, RuntimeError, ValueError) as exc:
+        if isinstance(exc, ParserUnavailable) or disk_full(exc):
+            raise
         record.update(status="failed", errors=[{"reason": f"{type(exc).__name__}: {exc}"}])
     _checkpoint(store, record)
 
 
 def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=None, json_only=False,
               completion_max_tokens=DEFAULT_COMPLETION_MAX_TOKENS, prioritize_cell=None, pdf_content=None,
-              retry_invalid_completion=False):
+              retry_invalid_completion=False, layout_reader=read_layout):
     if prioritize_cell and (local_only or len(paths) != 1):
         raise ValueError("Prioritizing a source cell requires a model batch of exactly one PDF")
     if pdf_content is not None and len(paths) != 1:
@@ -376,5 +371,5 @@ def run_batch(store, paths, domain, *, local_only, max_requests=None, complete=N
                 _checkpoint(store, {"document_id": pid, "path": str(path), "domain": domain, "status": "pending"})
         for path in paths:
             _process(store, path, domain, generation, prior.get(f"{domain}:{path.stem}"),
-                     prioritize_cell=prioritize_cell, content=pdf_content)
+                     prioritize_cell=prioritize_cell, content=pdf_content, layout_reader=layout_reader)
         return report(store, domain, selected, requests=generation.events)

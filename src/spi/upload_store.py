@@ -18,6 +18,7 @@ from typing import BinaryIO
 
 import pymupdf
 
+from . import pdf_boundary
 from .models import UPLOAD_ID_PATTERN, Domain, StoredUpload
 
 DEFAULT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024
@@ -113,6 +114,14 @@ def _display_filename(filename: str) -> str:
 
 
 def _pdf_pages(path: Path) -> int:
+    if pdf_boundary.enabled():
+        result = pdf_boundary.request("pages", path)
+        if result["status"] in {"invalid", "encrypted"}:
+            raise InvalidPdf("encrypted_pdf" if result["status"] == "encrypted" else "invalid_pdf")
+        count = result.get("pages")
+        if result["status"] != "ok" or type(count) is not int or not 1 <= count <= pdf_boundary.MAX_PAGES:
+            raise pdf_boundary.ParserUnavailable("pdf_parser_protocol")
+        return count
     try:
         with mupdf_lock, pymupdf.open(path, filetype="pdf") as pdf:
             if not pdf.is_pdf:

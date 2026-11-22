@@ -49,3 +49,10 @@ validation and monitoring. See the [security model](docs/SECURITY_MODEL.md).
 2. Evaluate against dev_gold and integrate with Alexander's UI.
 
 Schedule and ownership: ChatGPT Space sprint, 20–21 November 2026.
+# Production infrastructure
+
+For a local Docker Desktop setup with the static production frontend, see
+[Windows Compose demo](docs/DEMO_RUNBOOK.md#docker-desktop-локальная-production-сборка).
+Linux setup is in [Deployment](docs/DEPLOYMENT.md), with separate
+[Operations](docs/OPERATIONS_RUNBOOK.md), [Backup and restore](docs/BACKUP_RESTORE.md)
+and [Production readiness](docs/PRODUCTION_READINESS.md).
