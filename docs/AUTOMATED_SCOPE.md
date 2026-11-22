@@ -2,14 +2,15 @@
 
 The 180-PDF test release has 176 queued scope decisions (88 Solar and 88 RAG).
 This command analyzes the **local, original PDFs** using two independent
-non-interactive Codex calls per document. It is designed to replace manual
+non-interactive Codex calls per document (concurrently by default). It is designed to replace manual
 *proposal preparation*, not to claim a human read the paper.
 
 ## What it does
 
 - Reads every PDF page locally with PyMuPDF, with explicit page numbers.
 - Checks the SHA-256 and page count against the existing scope approval sheet.
-- Runs two separate, ephemeral, read-only Codex sessions (normal and skeptical).
+- Runs two separate, ephemeral, read-only Codex sessions (normal and skeptical)
+  concurrently by default. Results are associated with pass 1/pass 2 deterministically.
 - Requires two literal excerpts from **two distinct PDF pages in each pass**,
   correct page numbers, and agreement between both decisions.
 - Produces a resumable machine evidence manifest. No rows in
@@ -50,7 +51,9 @@ working tree: create a detached worktree after fetching the feature branch.
 
 The manifest is written to outputs/p0-22-release/machine-scope.json.
 Each record includes original SHA-256, the two model responses, exact quotes,
-source pages, and an explicit status. Failed or uncertain records remain
+source pages, status, and wall-clock timings (PDF read, each Codex pass, total).
+If the first pass cannot be verified in sequential mode, it abstains without a
+second Codex call. Failed or uncertain records remain
 needs_review; they are not silently promoted.
 
 ### Remaining papers (resumable)
@@ -60,6 +63,11 @@ needs_review; they are not silently promoted.
 On re-run, existing records are kept. To retry abstentions with the same model:
 
     python -B -X utf8 -m spi.automated_scope --root $root --retry-unresolved
+
+If your Codex account is rate-limited, add --sequential-passes to use one Codex
+process at a time; this preserves dual-pass acceptance for final decisions.
+Two concurrent processes may contend for an account's inference throughput,
+so a speedup is not guaranteed. Measure timing_ms.total before extrapolating.
 
 Do not set human_approved in scope-approval.csv. The local Codex sign-in may incur
 model usage costs. PDF text is sent to the selected Codex model; keep this
