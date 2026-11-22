@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import type { ReactNode } from 'react';
 import { Feedback, LoadBoundary } from '../components/Feedback';
+import { Icon } from '../components/Icon';
 import { InfoList } from '../components/InfoList';
 import { PdfPane } from '../components/PdfPane';
 import { ScientificReview, SolarStructure, solarStructureField } from '../components/ReviewSection';
@@ -113,13 +114,13 @@ export function ResultDetail({ result, filters }: { result: Result; filters: Fil
         <div className="stack">
           <ResultEvidence result={result}>
             <Link className="button primary" href={resultUrl(result.result_id, filters, true)}>
+              <Icon name="file" />
               Открыть страницу PDF
             </Link>
           </ResultEvidence>
           <section className="surface">
             <header className="section-bar">
               <h2>Связанные данные</h2>
-              <span className="count-label">Контекст записи</span>
             </header>
             <InfoList items={info} />
           </section>
@@ -190,14 +191,13 @@ export function NotFoundPage() {
         title="Страница не найдена"
         subtitle="Выберите раздел в меню или вернитесь к результатам."
       />
-      <Feedback kind="empty" title="Маршрут не существует">
+      <Feedback
+        kind="empty"
+        title="Маршрут не существует"
+        action={<Link className="button primary" href={sectionUrl('results')}>К результатам</Link>}
+      >
         Проверьте адрес страницы или перейдите к таблице результатов.
       </Feedback>
-      <div className="not-found-actions">
-        <Link className="button primary" href={sectionUrl('results')}>
-          К результатам
-        </Link>
-      </div>
     </div>
   );
 }

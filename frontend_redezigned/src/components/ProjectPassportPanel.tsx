@@ -195,9 +195,9 @@ function PassportForm({ exporter }: { exporter: PassportExport }) {
 
 export function ProjectPassportPanel() {
   return (
-    <section className="surface export-panel" aria-labelledby="project-passport-heading">
+    <section className="surface export-panel passport-panel" aria-labelledby="project-passport-heading">
       <div className="panel-intro">
-        <h2 id="project-passport-heading">Паспорт проекта (PDF)</h2>
+        <h2 id="project-passport-heading"><Icon name="file" size={20} />Паспорт проекта (PDF)</h2>
         <p className="muted">
           Полный отчёт по выбранной области с результатами, источниками и замечаниями.
         </p>

@@ -16,9 +16,11 @@
   --green-pen: #1b7048;
   --amber-pen: #8a5a00;
   --track: var(--cobalt);
-  --r-control: 6px;
-  --r-tag: 3px;
-  --r-sheet: 2px;
+  --accent-wash: color-mix(in srgb, var(--track) 7%, var(--sheet));
+  --shadow-sheet: 0 2px 5px rgb(18 35 74 / 5%);
+  --r-control: 8px;
+  --r-tag: 5px;
+  --r-sheet: 12px;
 }
 :root[data-track='rag'] { --track: var(--plum); }
 

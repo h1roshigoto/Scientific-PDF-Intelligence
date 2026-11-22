@@ -2,12 +2,13 @@ import type { ReactNode } from 'react';
 import { Link, sectionUrl } from '../navigation';
 import type { Section } from '../navigation';
 import { Icon } from './Icon';
+import type { IconName } from './Icon';
 
-const navigation: { id: Section; label: string }[] = [
-  { id: 'results', label: 'Результаты' },
-  { id: 'documents', label: 'Документы' },
-  { id: 'checks', label: 'Проверки' },
-  { id: 'export', label: 'Экспорт' },
+const navigation: { id: Section; label: string; icon: IconName }[] = [
+  { id: 'results', label: 'Результаты', icon: 'grid' },
+  { id: 'documents', label: 'Документы', icon: 'file' },
+  { id: 'checks', label: 'Проверки', icon: 'shield' },
+  { id: 'export', label: 'Экспорт', icon: 'down' },
 ];
 
 export function Shell({
@@ -29,7 +30,8 @@ export function Shell({
       <header className="masthead">
         <div className="masthead-inner">
           <Link className="wordmark" href="/">
-            Scientific PDF Intelligence
+            <span className="wordmark-symbol"><Icon name="layers" size={19} /></span>
+            <span>Scientific PDF Intelligence</span>
           </Link>
           <nav className="primary-nav" aria-label="Главная навигация">
             {(account ? navigation.filter(({ id }) => id === 'documents') : navigation).map((item) => (
@@ -38,6 +40,7 @@ export function Shell({
                 href={sectionUrl(item.id)}
                 aria-current={section === item.id && !account?.selected ? 'page' : undefined}
               >
+                <Icon name={item.icon} size={15} />
                 {item.label}
               </Link>
             ))}
@@ -98,15 +101,17 @@ export function PageHeading({
 export function WorkspacePage({
   title,
   subtitle,
+  action,
   children,
 }: {
   title: string;
   subtitle?: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <>
-      <PageHeading title={title} subtitle={subtitle} />
+      <PageHeading title={title} subtitle={subtitle}>{action}</PageHeading>
       <div>{children}</div>
     </>
   );

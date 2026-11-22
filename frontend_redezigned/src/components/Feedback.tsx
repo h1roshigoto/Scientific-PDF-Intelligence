@@ -1,19 +1,25 @@
 import type { ReactNode } from 'react';
 import type { LoadState } from '../hooks/useData';
+import { Icon } from './Icon';
 
 export function Feedback({
   kind,
   title,
   children,
   retry,
+  action,
 }: {
   kind: 'empty' | 'error' | 'loading';
   title: string;
   children?: ReactNode;
   retry?: () => void;
+  action?: ReactNode;
 }) {
   return (
     <div className={`feedback ${kind}`} role={kind === 'error' ? 'alert' : 'status'} aria-busy={kind === 'loading'}>
+      <span className="feedback-symbol" aria-hidden="true">
+        {kind === 'loading' ? <span className="feedback-spinner" /> : <Icon name={kind === 'error' ? 'alert' : 'file'} size={20} />}
+      </span>
       <div className="feedback-body">
         <h2>{title}</h2>
         {children && <p>{children}</p>}
@@ -23,6 +29,7 @@ export function Feedback({
           Повторить
         </button>
       )}
+      {action}
     </div>
   );
 }

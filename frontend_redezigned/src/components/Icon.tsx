@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 
-export type IconName = 'down' | 'search' | 'next' | 'back' | 'open' | 'check' | 'alert';
+export type IconName = 'down' | 'search' | 'next' | 'back' | 'open' | 'check' | 'alert' | 'grid' | 'file' | 'layers' | 'shield' | 'filter';
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   const style = {

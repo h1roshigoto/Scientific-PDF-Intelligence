@@ -24,12 +24,12 @@ function IssueDetails({ issue, rows }: { issue: Issue; rows: Result[] }) {
   const badgeTone = scope?.tone ?? (issue.severity === 'warning' ? 'warn' : issue.severity);
 
   return (
-    <section className="surface inspector issue-inspector" aria-labelledby="issue-title">
+    <section className="surface inspector issue-inspector" id="check-inspector" tabIndex={-1} aria-labelledby="issue-title">
       <div className="inspector-title-row">
         <h2 id="issue-title">Причина замечания</h2>
         <Badge tone={badgeTone}>{scope?.label ?? severityLabel[issue.severity]}</Badge>
       </div>
-      <p className="issue-reason">{issue.reason}</p>
+      <div className="issue-reason"><Icon name="shield" /><p>{issue.reason}</p></div>
       <InfoList
         items={[
           ['Правило', checkLabel(issue)],
@@ -103,12 +103,15 @@ export function ChecksPage({ selected }: { selected: string | null }) {
                       <Link
                         href={sectionUrl('checks', undefined, issue.issue_id)}
                         aria-current={chosen.issue_id === issue.issue_id ? 'true' : undefined}
+                        onClick={(event) => {
+                          if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+                          if (window.matchMedia('(max-width: 760px)').matches) {
+                            requestAnimationFrame(() => document.getElementById('check-inspector')?.focus());
+                          }
+                        }}
                       >
-                        <span
-                          className={`severity-dot ${issue.severity === 'warning' ? 'warn' : issue.severity}`}
-                          aria-hidden="true"
-                        />
                         <span className="review-item-text">
+                          <Badge tone={issue.severity === 'warning' ? 'warn' : issue.severity}>{severityLabel[issue.severity]}</Badge>
                           <strong>{checkLabel(issue)}</strong>
                           <small>{issue.reason}</small>
                         </span>
