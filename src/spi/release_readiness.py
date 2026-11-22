@@ -11,6 +11,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory, mkdtemp
 
+from .automated_scope import machine_decisions
 from .batch_checks import quality_gate
 from .build_scope_sheet import DISPUTED, cell, read_approval, read_queue
 from .csv_export import export_submission, read_submission, validate_submission
@@ -169,6 +170,17 @@ def audit(args, run):
             stage = 'scope'
             queue, sheet = read_queue(args.queue), read_approval(args.approval)
             decisions = validate_review(docs, scopes, queue, sheet, args.baseline, args.root)
+            if getattr(args, 'machine_scope', None) is not None:
+                automated = machine_decisions(args.machine_scope, args.root, docs, sheet)
+                overlap = automated.keys() & decisions.keys()
+                if any(automated[key] != decisions[key] for key in overlap):
+                    raise ValueError('Machine scope conflicts with an already confirmed decision')
+                decisions.update(automated)
+                report['machine_scope'] = {
+                    'mode': 'two-pass evidence-verified model decisions; not human approval',
+                    'accepted': len(automated),
+                    'remaining': len(sheet.keys() - decisions.keys()),
+                }
             if args.previous_release_state.exists():
                 if not (args.previous_release_state / 'documents.json').is_file():
                     raise ValueError('Existing release-state has no document registry')
@@ -234,12 +246,14 @@ def main(argv=None):
     parser.add_argument('--baseline', type=Path, default=Path('outputs/test-corpus-intake/previously-reviewed-scopes.json'))
     parser.add_argument('--approval', type=Path, default=Path('outputs/p0-22-release/scope-approval.csv'))
     parser.add_argument('--previous-release-state', type=Path, default=Path('outputs/p0-22-release/release-state'))
+    parser.add_argument('--machine-scope', type=Path, help='Opt-in SHA-bound two-pass Codex evidence manifest; never sets human_approved')
     parser.add_argument('--contracts', type=Path, default=Path('outputs/contracts'))
     parser.add_argument('--solar-template', type=Path,
                         default=Path('outputs/p0-19-20261121-052958-94843d/solar-participant-template'))
     parser.add_argument('--rag-template', type=Path, default=Path('outputs/contracts/rag/submission_template'))
     args = parser.parse_args(argv)
-    args = argparse.Namespace(**{name: path.resolve() for name, path in vars(args).items()})
+    args = argparse.Namespace(**{name: path.resolve() if isinstance(path, Path) else path
+                                 for name, path in vars(args).items()})
     run = Path(mkdtemp(prefix='spi-release-')).resolve()
     report = audit(args, run)
     statuses = {entry['status'] for group in ('steps', 'contracts') for entry in report[group].values()}

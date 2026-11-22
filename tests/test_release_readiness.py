@@ -326,3 +326,26 @@ def test_submission_projection_keeps_registered_metadata_and_explicit_result_con
     assert actual['publications'][0]['DOI'] == '10.1234/test'
     assert actual['publications'][0]['authors'] == 'А. Автор; Б. Автор'
     assert all(actual['results'][0][key] == str(value) for key, value in expected_context.items())
+
+
+def test_opt_in_machine_scope_can_clear_scope_gate_without_human_impersonation(tmp_path, monkeypatch):
+    from spi.models import PublicationScope
+
+    args = make_release(tmp_path, monkeypatch, 'scope')
+    args.machine_scope = tmp_path / 'machine-scope.json'
+
+    def synthetic_machine_decision(path, root, docs, sheet):
+        assert path == args.machine_scope
+        key = 'rag:P001'
+        return {key: PublicationScope(document_id=key, pdf_sha256=docs[key]['sha256'],
+                                      status='in_scope', reason='Two verified synthetic PDF excerpts',
+                                      source_pages=[1])}
+
+    monkeypatch.setattr(release, 'machine_decisions', synthetic_machine_decision)
+    run = tmp_path / 'machine-audit'
+    run.mkdir()
+    report = release.audit(args, run)
+    assert report['steps']['scope']['status'] == 'PASS'
+    assert report['steps']['scope']['pending'] == 0
+    assert report['machine_scope']['accepted'] == 1
+    assert builder.read_approval(args.approval)['rag:P001']['human_approved'] == ''
