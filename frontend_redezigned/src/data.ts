@@ -21,7 +21,7 @@ export interface Provider {
 }
 
 export class DataError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(message: string, readonly status?: number, readonly retryAfter?: number) {
     super(message);
     this.name = 'DataError';
   }
@@ -53,10 +53,10 @@ function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readon
           ? detailMessages[detail] : undefined) ?? statusMessages[response.status] ?? (response.status === 404
           ? 'Запрошенный файл или запись недоступны.'
           : `Сервер вернул ошибку HTTP ${response.status}.`);
-        const wait = Number(response.headers.get('Retry-After'));
-        throw new DataError(response.status === 429
-          ? `${message}${Number.isSafeInteger(wait) && wait > 0 ? ` Повторите через ${wait} с.` : ''}`
-          : message, response.status);
+        const seconds = Number(response.headers.get('Retry-After'));
+        const retryAfter = Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
+        throw new DataError(response.status === 429 && retryAfter ? `${message} Повторите через ${retryAfter} с.` : message,
+          response.status, retryAfter);
       }
       return await read(response);
     } catch (error) {
@@ -220,20 +220,31 @@ const uploadDetails = {
   upload_export_storage_error: 'Сервер не смог подготовить экспорт. Повторите попытку.',
 };
 
-export type UploadAuth = { mode: 'private' } | { mode: 'multiuser'; sessionId: string; onUnauthorized: () => void };
+export type UploadAuth = { mode: 'private'; onUnauthorized?: (token: string) => void }
+  | { mode: 'multiuser'; sessionId: string; onUnauthorized: () => void };
 
 export function createUploadClient(fetcher = fetch, auth: UploadAuth = { mode: 'private' }) {
   const endpoint = '/api/uploads';
+  const privateFetch: typeof fetch = async (input, init) => {
+    const response = await fetcher(input, init);
+    // The list request also validates newly entered tokens and reports rejection in the form.
+    if (auth.mode === 'private' && response.status === 401 && !init?.signal?.aborted
+      && (input !== endpoint || init?.method === 'POST')) {
+      const authorization = new Headers(init?.headers).get('Authorization');
+      if (authorization?.startsWith('Bearer ')) auth.onUnauthorized?.(authorization.slice(7));
+    }
+    return response;
+  };
   const http = client(auth.mode === 'multiuser'
     ? sessionFetcher(fetcher, auth.sessionId, auth.onUnauthorized)
-    : fetcher, 120_000, {
+    : privateFetch, 120_000, {
     ...accountStatuses,
     401: auth.mode === 'private' ? 'Неверный токен доступа.' : 'Войдите, чтобы продолжить.',
     503: 'Приватная загрузка сейчас недоступна.',
   }, { ...accountDetails, ...uploadDetails });
   const privateRequest = (token: string): RequestInit => auth.mode === 'private'
     ? { cache: 'no-store', credentials: 'omit', redirect: 'error',
-      headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      headers: /^[A-Za-z0-9._~+/-]+={0,2}$/.test(token) ? { Authorization: `Bearer ${token}` } : {} }
     : sessionInit;
   const uploadEndpoint = (id: string, action: string) => `${endpoint}/${encodeURIComponent(id)}/${action}`;
   const reviewEndpoint = (id: string, result: string) => uploadEndpoint(id, `results/${encodeURIComponent(result)}/review`);

@@ -66,10 +66,11 @@ test('signs in, validates, retries, persists and opens an uploaded Solar PDF', a
     if (new URL(event.url()).pathname.startsWith(endpoint)) uploadRequests.push(event.url());
   });
   await page.setViewportSize({ width: 320, height: 700 });
-  await page.goto('/results');
+  await page.goto('/');
   await page.getByRole('link', { name: 'Загрузить PDF' }).click();
+  await expect(page).toHaveURL(/\/documents$/);
   const scope = panel(page);
-  await signIn(page, 'incorrect');
+  await signIn(page, 'неверный токен');
   await expect(scope.getByRole('alert')).toHaveText('Неверный токен доступа.');
   await signIn(page);
   const upload = scope.getByRole('button', { name: 'Загрузить PDF', exact: true });
@@ -123,7 +124,7 @@ test('signs in, validates, retries, persists and opens an uploaded Solar PDF', a
   const row = scope.getByRole('listitem').filter({ hasText: filename });
   await expect(row).toHaveCount(1);
   await expect(row).toContainText('Solar · 3 стр.');
-  await expect(row).toContainText('stored');
+  await expect(row).toContainText('PDF сохранён');
   await expect(row.locator('time')).toHaveAttribute('datetime', entry.created_at);
   const original = page.waitForRequest((event) => new URL(event.url()).pathname === `${endpoint}/${entry.upload_id}/file`);
   await row.getByRole('button', { name: `Открыть оригинал ${filename}` }).click();
@@ -143,6 +144,75 @@ test('signs in, validates, retries, persists and opens an uploaded Solar PDF', a
   await expect(row).toHaveCount(0);
   await signIn(page);
   await expect(row).toBeVisible();
+});
+
+test('analyzes a private RAG upload, recovers polling and access, then opens evidence and exports', async ({ page, request }, info) => {
+  const fixture = await request.get('/api/__test/rag-fixture.pdf');
+  expect(fixture.ok()).toBe(true);
+  const filename = `RAG-${randomUUID()}.pdf`;
+  await page.goto('/');
+  await page.getByRole('link', { name: 'Загрузить PDF' }).click();
+  await signIn(page);
+  const scope = panel(page);
+  await scope.getByLabel('Файл PDF').setInputFiles({ name: filename, mimeType: 'application/pdf', buffer: await fixture.body() });
+  await scope.getByLabel('Направление').selectOption('rag');
+  const uploaded = page.waitForResponse((reply) => new URL(reply.url()).pathname === endpoint && reply.request().method() === 'POST');
+  await scope.getByRole('button', { name: 'Загрузить PDF', exact: true }).click();
+  const upload = await uploaded;
+  expect(upload.status()).toBe(201);
+  const { upload_id: id } = await upload.json();
+  const base = `${endpoint}/${id}`;
+  const row = scope.getByRole('listitem').filter({ hasText: filename });
+  const start = row.getByRole('button', { name: 'Начать анализ' });
+  await expect(start).toBeEnabled();
+
+  let starts = 0;
+  page.on('request', (event) => {
+    if (new URL(event.url()).pathname === `${base}/process`) starts += 1;
+  });
+  let resume!: () => void;
+  const pending = new Promise<void>((resolve) => { resume = resolve; });
+  await page.route(`**${base}/process`, async (route) => {
+    await pending;
+    await route.continue();
+  }, { times: 1 });
+  await page.route(`**${base}/processing`, (route) => route.fulfill({ status: 503 }), { times: 1 });
+  const enqueued = page.waitForResponse((reply) => new URL(reply.url()).pathname === `${base}/process`);
+  try {
+    await start.dblclick();
+    await expect(row.getByRole('button', { name: 'Запускаем анализ…' })).toBeDisabled();
+  } finally {
+    resume();
+  }
+  expect((await enqueued).status()).toBe(202);
+  await expect(row).toContainText('В очереди');
+  await expect(row.getByRole('alert')).toContainText('Не удалось обновить состояние');
+  await expect(row).toContainText('Результатов — 16');
+  await expect(row.getByRole('alert')).toHaveCount(0);
+  expect(starts).toBe(1);
+
+  await row.getByRole('link', { name: 'Посмотреть результаты' }).click();
+  const results = page.getByRole('list', { name: 'Научные записи' });
+  await expect(results.getByRole('listitem')).toHaveCount(16);
+  const originalUrl = `**${base}/file`;
+  await page.route(originalUrl, (route) => route.fulfill({ status: 401 }));
+  await results.getByRole('link', { name: 'Открыть источник' }).first().click();
+  await expect(page.getByRole('alert')).toContainText('Доступ к загрузкам истёк');
+  await page.unroute(originalUrl);
+  await page.getByLabel('Токен доступа').fill(token);
+  await page.getByRole('button', { name: 'Войти' }).click();
+  await expect(page.locator('canvas')).toHaveAttribute('data-rendered-page', '1');
+  await expect(page.getByTestId('pdf-page-text')).toContainText('Qwen-Embed');
+
+  await page.getByRole('link', { name: 'К результатам загрузки' }).first().click();
+  await expect(exportPanel(page)).toContainText('Подтверждённых записей пока нет');
+  const download = page.waitForEvent('download');
+  await exportPanel(page).getByRole('button', { name: 'Скачать ZIP' }).click();
+  const file = await download;
+  expect(file.suggestedFilename()).toBe(`spi-project-rag-${id}.zip`);
+  const archive = info.outputPath('private-rag.zip');
+  await file.saveAs(archive);
+  execFileSync('python', ['-m', 'spi.upload_export_verify', archive]);
 });
 
 test('reviews and exports real local extraction, keeps history after sign-in, and recovers from a revision conflict', async ({ page, request }) => {

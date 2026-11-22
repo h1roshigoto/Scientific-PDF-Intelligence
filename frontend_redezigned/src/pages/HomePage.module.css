@@ -67,7 +67,8 @@
 }
 .heroCopy h1 span { display: block; white-space: nowrap; }
 .heroCopy p { max-width: 470px; color: var(--ink-soft); font-size: 19px; line-height: 1.55; }
-.page .cta {
+.heroActions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.page .cta, .page .secondaryCta {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -83,7 +84,9 @@
   white-space: nowrap;
 }
 .page .cta:hover { background: #1d3569; }
-.cta .icon { --glyph-size: 17px; }
+.page .secondaryCta { background: transparent; color: var(--ink); border-color: transparent; }
+.page .secondaryCta:hover { text-decoration: underline; }
+.heroActions .icon { --glyph-size: 17px; }
 
 .trace {
   position: relative;

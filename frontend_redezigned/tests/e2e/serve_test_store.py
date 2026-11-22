@@ -75,6 +75,26 @@ def processing_fixture(path: Path) -> None:
         pdf.save(path)
 
 
+def rag_fixture(path: Path) -> None:
+    leaves = (130, 175, 220, 265, 310, 355, 400, 445)
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((45, 50), "Table 1: We compare generators across QA datasets; retriever: Qwen-Embed")
+        rows = [
+            (66, "", [(197.5, "Gemini-2.5 Flash"), (377.5, "Mistral v3-8B Instruct")]),
+            (79, "", zip((152.5, 242.5, 332.5, 422.5), ("AtlasQA", "DeltaQA") * 2)),
+            (92, "Method", zip(leaves, ("EM", "F1") * 4)),
+            (108, "GPT-4o mini", zip(leaves, (f".{100 + i}" for i in range(8)))),
+            (123, "Graph RAG", zip(leaves, (f".{200 + i}" for i in range(8)))),
+        ]
+        for y, label, columns in rows:
+            if label:
+                page.insert_text((45, y), label)
+            for x, value in columns:
+                page.insert_text((x - pymupdf.get_text_length(value) / 2, y), value)
+        pdf.save(path)
+
+
 if __name__ == "__main__":
     with TemporaryDirectory(prefix="spi-playwright-") as folder:
         root = Path(folder)
@@ -92,13 +112,20 @@ if __name__ == "__main__":
 
         fixture = root / "processing-fixture.pdf"
         processing_fixture(fixture)
+        rag = root / "rag-fixture.pdf"
+        rag_fixture(rag)
 
         @app.get("/__test/processing-fixture.pdf", include_in_schema=False)
         def fixture_pdf():
             return FileResponse(fixture, media_type="application/pdf")
+
+        @app.get("/__test/rag-fixture.pdf", include_in_schema=False)
+        def rag_pdf():
+            return FileResponse(rag, media_type="application/pdf")
 
         with subprocess.Popen([sys.executable, "-m", "spi.upload_worker"]) as worker:
             try:
                 uvicorn.run(app, host="127.0.0.1", port=8182)
             finally:
                 worker.terminate()
+                worker.wait()
