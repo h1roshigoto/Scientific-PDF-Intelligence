@@ -302,7 +302,9 @@ def test_submission_projection_keeps_registered_metadata_and_explicit_result_con
     )
     submission = store_export.project_submission(
         store, load_schema(track), args.root / 'data' / track / 'test',
-        publication_ids=['P001', 'P002'], reviewed_scopes=decisions,
+        publication_ids=['P001', 'P002'],
+        reviewed_scopes={(decision.document_id, decision.pdf_sha256): decision
+                         for decision in decisions.values()},
     )
     publication, excluded = submission.tables['publications']
     assert publication == {
