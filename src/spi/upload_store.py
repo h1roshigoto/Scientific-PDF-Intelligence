@@ -1,10 +1,11 @@
 """Storage and technical PDF validation for private uploads."""
 
+import json
 import os
 import re
 import sqlite3
 import unicodedata
-from contextlib import closing
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -77,10 +78,25 @@ def private_path(root: Path, relative: Path, *, directory: bool = False) -> Path
     return path
 
 
-def private_sqlite_path(root: Path, name: Path) -> Path:
+def private_sqlite_path(root: Path, name: Path | str) -> Path:
+    name = Path(name)
     for suffix in ("-journal", "-wal", "-shm"):
         private_path(root, name.with_name(name.name + suffix))
     return private_path(root, name)
+
+
+@contextmanager
+def storage_lease(root: Path, *, exclusive: bool = False, create: bool = True):
+    """Hold a crash-released shared lease, or require the Store to be offline."""
+    if create:
+        private_path(root, Path(), directory=True).mkdir(parents=True, exist_ok=True)
+    path = private_sqlite_path(root, Path("maintenance.sqlite3"))
+    # FastAPI can enter and exit a request dependency on different threads.
+    # The connection is only used here, with no concurrent operations.
+    with closing(sqlite3.connect(path, timeout=0 if exclusive else 15, check_same_thread=False)) as db:
+        db.execute("BEGIN EXCLUSIVE" if exclusive else "BEGIN")
+        db.execute("SELECT name FROM sqlite_schema").fetchall()
+        yield
 
 
 def _positive_limit(name: str, default: int) -> int:
@@ -119,6 +135,8 @@ class UploadStore:
     max_bytes: int
     max_files: int
     processing: Path | None = None
+    owner_user_id: str | None = None
+    max_total_bytes: int | None = None
 
     @classmethod
     def from_env(cls) -> "UploadStore":
@@ -143,6 +161,8 @@ class UploadStore:
             raise ValueError("Upload paths must be separate from each other and protected paths")
         for path in resolved:
             private_path(path, Path(), directory=True)
+        for path in paths:
+            private_path(path.absolute(), Path(), directory=True)
         return cls(*resolved[:2], _positive_limit("SPI_UPLOAD_MAX_BYTES", DEFAULT_UPLOAD_MAX_BYTES),
                    _positive_limit("SPI_UPLOAD_MAX_FILES", 100), resolved[2] if process_value else None)
 
@@ -159,23 +179,42 @@ class UploadStore:
             raise
         return connection
 
+    def _record(self, metadata, upload_id):
+        upload = StoredUpload.model_validate_json(metadata)
+        if upload.upload_id != upload_id or upload.owner_user_id != self.owner_user_id:
+            raise ValueError("Upload catalog identity mismatch")
+        return upload
+
+    @staticmethod
+    def metadata(upload):
+        data = upload.model_dump(mode="json")
+        if upload.owner_user_id is not None:
+            data["owner_user_id"] = upload.owner_user_id
+        return json.dumps(data, ensure_ascii=False)
+
     def list(self) -> list[StoredUpload]:
         with closing(self._connect()) as db:
-            rows = db.execute("SELECT metadata FROM uploads ORDER BY created_at DESC, upload_id DESC")
-            return [StoredUpload.model_validate_json(row[0]) for row in rows]
+            rows = db.execute("SELECT upload_id, metadata FROM uploads ORDER BY created_at DESC, upload_id DESC")
+            return [self._record(metadata, upload_id) for upload_id, metadata in rows]
+
+    def usage(self) -> tuple[int, int]:
+        with closing(self._connect()) as db:
+            return self._usage(db)
+
+    @staticmethod
+    def _usage(db):
+        return db.execute("""SELECT count(*), coalesce(sum(json_extract(metadata, '$.size_bytes')), 0)
+                          FROM uploads""").fetchone()
 
     def get(self, upload_id: str) -> StoredUpload | None:
         with closing(self._connect()) as db:
             row = db.execute("SELECT metadata FROM uploads WHERE upload_id = ?", (upload_id,)).fetchone()
             if not row:
                 return None
-            upload = StoredUpload.model_validate_json(row[0])
-            if upload.upload_id != upload_id:
-                raise ValueError("Upload catalog ID mismatch")
-            return upload
+            return self._record(row[0], upload_id)
 
     def file(self, upload: StoredUpload) -> Path | None:
-        if not re.fullmatch(UPLOAD_ID_PATTERN, upload.upload_id):
+        if not re.fullmatch(UPLOAD_ID_PATTERN, upload.upload_id) or upload.owner_user_id != self.owner_user_id:
             raise ValueError("Invalid upload ID")
         try:
             path = private_path(self.files, Path(f"{upload.upload_id}.pdf"))
@@ -185,9 +224,22 @@ class UploadStore:
 
     def save(self, source: BinaryIO, filename: str, domain: Domain) -> StoredUpload:
         private_path(self.files, Path(), directory=True).mkdir(parents=True, exist_ok=True)
+        with ExitStack() as resources:
+            return self._save(resources, source, filename, domain)
+
+    def _save(self, resources, source, filename, domain):
+        db = None
         temporary = None
         published = None
         try:
+            used = 0
+            if self.owner_user_id is not None:
+                db = resources.enter_context(closing(self._connect()))
+                db.execute("BEGIN IMMEDIATE")
+                count, used = self._usage(db)
+                self._remove_interrupted_uploads(db)
+                if count >= self.max_files:
+                    raise UploadQuotaFull
             with NamedTemporaryFile(dir=self.files, prefix=".upload-", suffix=".part", delete=False) as target:
                 temporary = Path(target.name)
                 digest = sha256()
@@ -202,32 +254,50 @@ class UploadStore:
                     target.write(chunk)
                 if size == 0:
                     raise InvalidPdf("empty_pdf")
+                if self.max_total_bytes is not None and used + size > self.max_total_bytes:
+                    raise UploadQuotaFull
                 target.flush()
                 os.fsync(target.fileno())
 
             pages = _pdf_pages(temporary)
-            with closing(self._connect()) as db, db:
+            if db is None:
+                resources.enter_context(storage_lease(self.state))
+                db = resources.enter_context(closing(self._connect()))
                 db.execute("BEGIN IMMEDIATE")
-                if db.execute("SELECT count(*) FROM uploads").fetchone()[0] >= self.max_files:
+                if self._usage(db)[0] >= self.max_files:
                     raise UploadQuotaFull
-                upload_id = token_hex(16)
-                destination = self.files / f"{upload_id}.pdf"
-                if destination.exists() or destination.is_symlink():
-                    raise OSError("Upload ID collision")
-                upload = StoredUpload(
-                    upload_id=upload_id, domain=domain, original_filename=_display_filename(filename),
-                    size_bytes=size, sha256=digest.hexdigest(), page_count=pages,
-                    created_at=datetime.now(timezone.utc),
-                )
-                db.execute("INSERT INTO uploads VALUES (?, ?, ?)",
-                           (upload_id, upload.created_at.isoformat(timespec="microseconds"), upload.model_dump_json()))
-                os.replace(temporary, destination)
-                published = destination
+            upload_id = token_hex(16)
+            destination = self.files / f"{upload_id}.pdf"
+            if destination.exists() or destination.is_symlink():
+                raise OSError("Upload ID collision")
+            upload = StoredUpload(
+                upload_id=upload_id, owner_user_id=self.owner_user_id, domain=domain,
+                original_filename=_display_filename(filename), size_bytes=size, sha256=digest.hexdigest(),
+                page_count=pages, created_at=datetime.now(timezone.utc),
+            )
+            db.execute("INSERT INTO uploads VALUES (?, ?, ?)",
+                       (upload_id, upload.created_at.isoformat(timespec="microseconds"), self.metadata(upload)))
+            os.replace(temporary, destination)
+            published = destination
+            db.commit()
             return upload
         except BaseException:
             if published is not None:
                 published.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            if db is not None:
+                db.rollback()
             raise
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def _remove_interrupted_uploads(self, db):
+        # No other uploader can create a staging file before taking this write lock.
+        ids = {row[0] for row in db.execute("SELECT upload_id FROM uploads")}
+        for path in self.files.iterdir():
+            if (re.fullmatch(r"\.upload-[a-z0-9_]+\.part", path.name)
+                    or (path.suffix == ".pdf" and re.fullmatch(UPLOAD_ID_PATTERN, path.stem)
+                        and path.stem not in ids)):
+                private_path(self.files, Path(path.name)).unlink()

@@ -13,10 +13,12 @@ const navigation: { id: Section; label: string }[] = [
 export function Shell({
   section,
   mock,
+  account,
   children,
 }: {
   section: Section;
   mock: boolean;
+  account?: { selected: boolean; onLogout: () => void };
   children: ReactNode;
 }) {
   return (
@@ -30,18 +32,20 @@ export function Shell({
             Scientific PDF Intelligence
           </Link>
           <nav className="primary-nav" aria-label="Главная навигация">
-            {navigation.map((item) => (
+            {(account ? navigation.filter(({ id }) => id === 'documents') : navigation).map((item) => (
               <Link
                 key={item.id}
                 href={sectionUrl(item.id)}
-                aria-current={section === item.id ? 'page' : undefined}
+                aria-current={section === item.id && !account?.selected ? 'page' : undefined}
               >
                 {item.label}
               </Link>
             ))}
+            {account && <Link href="/account" aria-current={account.selected ? 'page' : undefined}>Аккаунт</Link>}
           </nav>
           <div className="masthead-meta">
-            {import.meta.env.DEV && mock ? (
+            {account ? <button className="button quiet" type="button" onClick={account.onLogout}>Выйти</button>
+              : import.meta.env.DEV && mock ? (
               <span
                 className="data-flag"
                 title="Изолированный режим разработки"
@@ -97,7 +101,7 @@ export function WorkspacePage({
   children,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   children: ReactNode;
 }) {
   return (

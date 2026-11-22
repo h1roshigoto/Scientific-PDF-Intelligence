@@ -69,6 +69,166 @@ curl.exe --fail --show-error --dump-header - --output "$spiReport" "$spiApi/expo
 
 В заголовках ожидаются `Content-Type: application/pdf`, `Content-Disposition` с именем файла и `X-SPI-Generated-At`. Проверьте, что PDF открывается и содержит последнюю страницу.
 
+## Multiuser на Windows
+
+Запустите PowerShell 7 из корня репозитория. Для локального режима используйте
+один адрес, `http://127.0.0.1:5173`. Выделите каталоги за пределами репозитория,
+официального Store, `outputs` и приватного demo Store.
+
+```powershell
+python -m pip install -e '.[dev]'
+$spiRoot = Join-Path $env:LOCALAPPDATA 'ScientificPDFIntelligence'
+$env:SPI_AUTH_MODE = 'multiuser'
+$env:SPI_AUTH_DB = Join-Path $spiRoot 'accounts\auth.sqlite3'
+$env:SPI_MULTIUSER_STORAGE_ROOT = Join-Path $spiRoot 'multiuser'
+$env:SPI_AUTH_SECRET = python -c "import secrets; print(secrets.token_urlsafe(32))"
+$env:SPI_AUTH_LOCAL_DEVELOPMENT = 'true'
+$env:SPI_AUTH_COOKIE_SECURE = 'false'
+$env:SPI_AUTH_ALLOWED_ORIGINS = 'http://127.0.0.1:5173,http://127.0.0.1:8000'
+$env:SPI_AUTH_TRUSTED_PROXIES = ''
+$env:SPI_AUTH_CSRF_ENABLED = 'true'
+$env:SPI_RATE_LIMIT_ENABLED = 'true'
+$env:SPI_PUBLIC_DEMO_ENABLED = 'false'
+$env:SPI_UPLOAD_PROCESS_GIGACHAT = 'false'
+$env:SPI_USER_MAX_UPLOAD_FILES = '100'
+$env:SPI_USER_MAX_TOTAL_STORAGE_BYTES = '524288000'
+$env:SPI_USER_MAX_PDF_BYTES = '26214400'
+$env:SPI_USER_MAX_ACTIVE_JOBS = '1'
+$env:SPI_USER_MAX_QUEUED_JOBS = '4'
+$env:SPI_USER_MAX_MODEL_REQUESTS = '80'
+$env:SPI_USER_MAX_EXPORTS_PER_PERIOD = '30'
+$env:SPI_USER_MAX_RETRIES = '3'
+$env:SPI_GLOBAL_MAX_ACTIVE_JOBS = '2'
+$env:SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS = '8'
+```
+
+API и worker должны получить один и тот же набор переменных.
+Для постоянной установки храните `SPI_AUTH_SECRET` в защищённой конфигурации
+процесса и используйте одно значение на всех API-процессах.
+Параметры `SPI_USER_*` переопределяются для конкретного аккаунта через
+таблицу `user_quotas(user_id, name, value)`. Имя записывается строчными буквами
+без префикса `SPI_USER_`, например `max_queued_jobs`. Настройки меняйте
+при остановленных API и worker, затем проверьте их в разделе «Аккаунт».
+
+Создайте первого администратора один раз. CLI запросит скрытый пароль и его
+подтверждение. Следующая команда запросит пароль администратора и выведет
+одноразовый код для передачи пользователю.
+
+```powershell
+python -m spi.auth_cli bootstrap-admin --email 'operator@example.test' --display-name 'Operator'
+python -m spi.auth_cli invite --admin-email 'operator@example.test' --ttl-seconds 86400
+```
+
+Запустите серверы из той же вкладки. Фоновые задания наследуют заданное
+окружение. Сценарий работает с локальным извлечением без облачных credentials.
+
+```powershell
+$spiRepo = (Get-Location).Path
+$spiApi = Start-Job -WorkingDirectory $spiRepo -ScriptBlock {
+    python -m uvicorn spi.api:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+}
+$spiWorker = Start-Job -WorkingDirectory $spiRepo -ScriptBlock {
+    python -m spi.upload_worker
+}
+$spiHealth = $null
+for ($spiAttempt = 0; $spiAttempt -lt 30 -and -not $spiHealth; $spiAttempt++) {
+    try { $spiHealth = Invoke-RestMethod 'http://127.0.0.1:8000/health' -TimeoutSec 2 }
+    catch { Start-Sleep -Seconds 1 }
+}
+if (-not $spiHealth) { Receive-Job -Job $spiApi -Keep; throw 'FastAPI health check failed' }
+Set-Location frontend_redezigned
+pnpm.cmd install --frozen-lockfile
+$env:SPI_BACKEND_URL = 'http://127.0.0.1:8000'
+pnpm.cmd dev --host 127.0.0.1 --port 5173 --strictPort
+```
+
+1. Откройте [локальный интерфейс](http://127.0.0.1:5173/documents).
+   Нажмите «У меня есть приглашение», заполните имя, email, пароль с
+   подтверждением и код. После регистрации войдите. Email остаётся непроверенным.
+2. В «Мои документы» загрузите PDF с направлением Solar или RAG и запустите
+   анализ. Дождитесь результатов, откройте научную запись и сверьте значение,
+   единицу и контекст со страницей PDF. Подтвердите, исправьте или отклоните запись.
+3. Вернитесь к результатам анализа, обновите экран экспорта и скачайте ZIP.
+   Проверьте архив офлайн.
+
+```powershell
+python -m spi.upload_export_verify 'C:\path\to\spi-project-solar-id.zip'
+```
+
+4. В «Аккаунт» проверьте квоты и текущие сессии. Нажмите «Отозвать» у другой
+   сессии или «Выйти» для текущей. Оператор может заблокировать пользователя
+   с отзывом всех сессий, указав его учетный ID.
+
+```powershell
+python -m spi.auth_cli block --admin-email 'operator@example.test' --user-id '<user_id>'
+```
+
+После остановки Vite через Ctrl+C остановите фоновые процессы. Если workspace
+перезапущен и фоновые задания отсутствуют, повторно задайте окружение для API и
+worker.
+
+```powershell
+Set-Location $spiRepo
+Receive-Job -Job $spiApi,$spiWorker -Keep
+Stop-Job -Job $spiApi,$spiWorker
+```
+
+### Перенос старого private Store
+
+Сохраните копию исходного каталога и остановите его API и worker. Старый
+каталог должен содержать `pdfs`, `metadata` и `processing`. Для иной раскладки
+подготовьте копию с этими именами. Подготовьте зарегистрированный аккаунт
+в multiuser и выполните перенос до первого обращения к его документам или
+квотам. Для получения ID владелец может войти через `POST /auth/login` и запросить
+`GET /auth/me` с cookie, минуя экран «Мои документы». ID также можно получить
+через локальный read-only запрос к `users` в auth DB.
+
+```powershell
+$spiSource = Join-Path $spiRoot 'private-upload'
+$spiOwner = '<existing_user_id>'
+python -m spi.migrate_private_uploads --source $spiSource --target $env:SPI_MULTIUSER_STORAGE_ROOT --owner-user-id $spiOwner --dry-run
+python -m spi.migrate_private_uploads --source $spiSource --target $env:SPI_MULTIUSER_STORAGE_ROOT --owner-user-id $spiOwner
+```
+
+Dry-run проверяет SQLite, идентичность заданий и чекпоинтов, ревизии review и
+SHA-256 PDF. Для блокировки он может создать служебный SQLite-файл. Реальный
+перенос проверяет скопированные данные и публикует каталог одним переименованием.
+Исходные файлы остаются доступны. Повтор той же миграции возвращает
+`already_imported`. При прерывании повторите команду с тем же владельцем.
+Временный каталог `migration-staging` можно очистить после остановки всех
+процессов миграции. При ошибке блокировки остановите исходный API, все исходные
+worker и операции целевого пользователя, затем повторите dry-run.
+
+Если нужно вернуть доступ к исходному Store, остановите multiuser API и worker,
+сохраните целевой namespace как резервную копию и поднимите исходную копию в
+`private`. Изменения после переноса останутся в сохранённом namespace. Храните
+резервные копии и исходные данные с теми же ограничениями доступа, что и рабочий Store.
+
+### Резервное копирование
+
+Остановите API, worker и все команды управления учётными записями. Копируйте
+SQLite auth DB с её каталогом и весь multiuser root в одну резервную копию.
+Секрет приложения и настройки сохраняйте отдельно в хранилище секретов.
+Для восстановления разверните оба каталога в изолированном окружении,
+проверьте SQLite через `PRAGMA integrity_check`, проверьте оригиналы по SHA-256 и
+прогоните offline verifier на тестовом экспорте. Перед возвратом в эксплуатацию
+отзовите восстановленные сессии, если требуется исключить возобновление
+ранее отозванных сессий. Файловая копия работающей SQLite или отдельных каталогов
+может содержать несовместимые снимки.
+
+```powershell
+$spiBackup = Join-Path $env:LOCALAPPDATA ('SPI-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $spiBackup
+Copy-Item -LiteralPath (Split-Path -Parent $env:SPI_AUTH_DB) -Destination (Join-Path $spiBackup 'accounts') -Recurse
+Copy-Item -LiteralPath $env:SPI_MULTIUSER_STORAGE_ROOT -Destination (Join-Path $spiBackup 'multiuser') -Recurse
+```
+
+Для production установите `SPI_AUTH_LOCAL_DEVELOPMENT=false`,
+`SPI_AUTH_COOKIE_SECURE=true`, задайте внешние HTTPS origins и IP доверенного
+reverse proxy. В multiuser официальные маршруты отключены, а включение
+`SPI_PUBLIC_DEMO_ENABLED` блокирует старт. Используйте руководство по TLS и
+изоляции worker из [модели безопасности](SECURITY_MODEL.md#production).
+
 ## Приватная загрузка PDF
 
 Для локального анализа нужны три процесса в отдельных вкладках PowerShell.
@@ -88,6 +248,7 @@ $env:SPI_UPLOAD_PROCESS_STATE_DIR = Join-Path $spiUploads 'processing'
 $env:SPI_UPLOAD_MAX_BYTES = '26214400'
 $env:SPI_UPLOAD_MAX_FILES = '100'
 $env:SPI_UPLOAD_ENABLED = 'true'
+$env:SPI_AUTH_MODE = 'private'
 $env:SPI_UPLOAD_PROCESS_GIGACHAT = 'false'
 ```
 
@@ -275,7 +436,7 @@ pnpm.cmd exec playwright install chromium
 pnpm.cmd test:e2e
 ```
 
-Если Chromium не скачивается, для Windows можно запустить Playwright через установленный Edge командой `$env:PLAYWRIGHT_CHANNEL = 'msedge'` перед `pnpm.cmd test:e2e`. Playwright поднимает тестовые серверы на `4175`, `4176`, `4177` и `8182`. Сценарий проверки запускает FastAPI и отдельный worker с временными каталогами и синтетическим PDF. Он проверяет подтверждение, исправление, отклонение, историю, повторный вход и восстановление после реального конфликта ревизий. CI не требует секретов GigaChat или приватного корпуса.
+Если Chromium не скачивается, для Windows можно запустить Playwright через установленный Edge командой `$env:PLAYWRIGHT_CHANNEL = 'msedge'` перед `pnpm.cmd test:e2e`. Playwright использует порты `4175`–`4178` и `8182`–`8183`. Сценарии private и multiuser запускают отдельные FastAPI и worker с временными каталогами и синтетическими PDF. Multiuser-сценарий проверяет два аккаунта, отзыв сессии, изоляцию результатов и ZIP, а также offline verifier. CI не требует секретов GigaChat или приватного корпуса. Для вывода Python в UTF-8 на Windows задайте `$env:PYTHONUTF8 = '1'`.
 
 Для отдельного Windows smoke-test поднимите три процесса командами выше и
 проверьте шаги 1–5 с локальной научной публикацией, которую можно использовать

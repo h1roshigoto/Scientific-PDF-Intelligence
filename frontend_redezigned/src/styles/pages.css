@@ -81,6 +81,9 @@ blockquote mark { color: inherit; padding: 0 2px; margin: 0 -2px; background: li
 .upload-panel { margin-bottom: 16px; }
 .upload-content { padding: 14px 16px; }
 .upload-form, .upload-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; }
+.account-entry { max-width: 540px; margin-inline: auto; }
+.account-form { display: grid; gap: 14px; }
+.account-form .button { justify-self: start; }
 .upload-form label { display: grid; min-width: 0; gap: 6px; font-weight: 600; }
 .upload-form :is(input, select) { min-width: 0; max-width: 100%; padding: 8px; border: 1px solid var(--rule); border-radius: var(--r-control); font-weight: 400; background: var(--sheet); }
 .upload-content p, .upload-actions { margin-top: 8px; }

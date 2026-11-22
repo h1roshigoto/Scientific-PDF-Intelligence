@@ -105,11 +105,21 @@ class ReviewLog:
             return events
 
     @contextmanager
-    def transaction(self, result_id):
+    def transaction(self, result_id, *, actor_user_id=None):
         with self._connect(write=True) as db:
+            if actor_user_id is not None:
+                db.execute("""CREATE TABLE IF NOT EXISTS review_actors (
+                    result_id TEXT NOT NULL, revision INTEGER NOT NULL, actor_user_id TEXT NOT NULL,
+                    PRIMARY KEY (result_id, revision),
+                    FOREIGN KEY (result_id, revision) REFERENCES review_events (result_id, revision)
+                )""")
+
             def append(event):
                 db.execute("INSERT INTO review_events VALUES (?, ?, ?)",
                            (result_id, event.revision, event.model_dump_json()))
+                if actor_user_id is not None:
+                    db.execute("INSERT INTO review_actors VALUES (?, ?, ?)",
+                               (result_id, event.revision, actor_user_id))
 
             yield self._latest(db, result_id), append
 
@@ -202,6 +212,8 @@ class UploadReviews:
     """One stable queue snapshot for a read or a complete review transaction."""
 
     def __init__(self, uploads, upload, root, job, *, write=False, verified_pdf=False):
+        if upload.owner_user_id != uploads.owner_user_id:
+            raise ReviewError(404, "upload_not_found")
         self.upload = upload
         self.processing = job.processing if job else UploadProcessing(upload_id=upload.upload_id, status="not_started")
         self.store = UploadProcessingStore(root, upload)
@@ -310,7 +322,7 @@ class UploadReviews:
         if self.pdf_status != "valid":
             raise ReviewError(409, "review_pdf_changed")
 
-        with self.log.transaction(result_id) as (previous, append):
+        with self.log.transaction(result_id, actor_user_id=self.upload.owner_user_id) as (previous, append):
             state = self._state(result_id, previous)
             if state.basis != request.basis:
                 raise ReviewError(409, "review_source_changed")

@@ -30,11 +30,18 @@ Sources use 1-based PDF page numbers.
 The original PDF paths are registered locally; PDF files, private datasets, API keys and local state are not committed.
 
 Private browser uploads and local analysis are available for Solar and RAG.
-They require a server-side bearer token and dedicated directories for originals,
-upload metadata and processing. After manual review, the upload page can export
+Use `SPI_AUTH_MODE=private` for the closed legacy demo with its server-side
+bearer token. Use `SPI_AUTH_MODE=multiuser` for invitation-only accounts,
+server-side cookie sessions and separate Stores per user. The worker uses the
+same authentication mode and paths as FastAPI. After manual review, the upload page can export
 current approvals in CSV and JSON, a private PDF passport and a ZIP with
 scientific issues, full decision history and offline SHA-256 verification.
-[Windows setup](docs/DEMO_RUNBOOK.md#приватная-загрузка-pdf) · [Private export contract](docs/API_CONTRACT.md#private-project-export-v1)
+
+For PowerShell commands, first admin setup, migration and backups, see the
+[Windows runbook](docs/DEMO_RUNBOOK.md#multiuser-на-windows). For account and API
+behavior, see the [API contract](docs/API_CONTRACT.md#authentication-modes).
+Public deployment requires operational TLS, PDF execution isolation, backup
+validation and monitoring. See the [security model](docs/SECURITY_MODEL.md).
 
 ## Next sprint steps
 

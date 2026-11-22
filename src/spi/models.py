@@ -15,6 +15,8 @@ class StoredUpload(BaseModel):
     """Technical metadata for an original in the private upload store."""
 
     upload_id: str = Field(pattern=UPLOAD_ID_PATTERN)
+    # Internal ownership is stored in the catalog, outside scientific snapshots.
+    owner_user_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$", exclude=True)
     domain: Domain
     original_filename: str = Field(min_length=1, max_length=255)
     size_bytes: int = Field(gt=0)

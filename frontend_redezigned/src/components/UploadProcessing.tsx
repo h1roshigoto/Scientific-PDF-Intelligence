@@ -25,6 +25,7 @@ const diagnostics: Record<string, string> = {
   model_credentials_missing_local: 'GigaChat не настроен. Использован локальный анализ.',
   model_unavailable_for_recovery: 'GigaChat недоступен для продолжения прерванного анализа.',
   request_budget_exhausted: 'Исчерпан лимит запросов к GigaChat. Повтор продолжит анализ с сохранённого этапа.',
+  'completion:model_request_quota_full': 'Исчерпан суточный лимит запросов к модели. Лимит обновится в полночь UTC.',
   page_analysis_failed: 'Некоторые страницы не удалось обработать.',
   worker_recovered: 'Worker продолжил прерванную обработку.',
 };

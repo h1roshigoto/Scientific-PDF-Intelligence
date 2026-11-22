@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
+from .auth_api import SecurityMiddleware, install_auth
+from .auth_config import AuthConfig, auth_mode
 from .config import load_project_env
 from .project_passport import (
     AmbiguousPublication, PublicationNotFound, passport_filename, render_project_passport,
@@ -16,31 +18,25 @@ from .storage import Store
 from .upload_api import router as upload_router
 from .upload_store import mupdf_lock
 
-load_project_env()
-app = FastAPI(title="Scientific PDF Intelligence API", version="0.1.0")
-app.include_router(upload_router)
+VERSION = "0.1.0"
+official_router = APIRouter()
 logger = logging.getLogger(__name__)
-origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
-if origins:
-    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"],
-                       expose_headers=["X-SPI-Generated-At"])
 
 
 def store():
     return Store(os.environ.get("SPI_STATE_DIR", "state"))
 
 
-@app.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.get("/documents")
+@official_router.get("/documents")
 def documents(domain: str | None = Query(None, pattern="^(solar|rag)$")):
     return [d for d in store().documents() if domain is None or d["domain"] == domain]
 
 
-@app.get("/results")
+@official_router.get("/results")
 def results(domain: str | None = Query(None, pattern="^(solar|rag)$")):
     return [_result_payload(row) for row in store().results(domain, include_excluded=False)]
 
@@ -49,7 +45,7 @@ def _result_payload(row):
     return row.model_dump(exclude={"extraction_metadata"} if row.extraction_metadata is None else None)
 
 
-@app.get("/results/{result_id}")
+@official_router.get("/results/{result_id}")
 def result_detail(result_id: str):
     for row in store().results(include_excluded=False):
         if row.result_id == result_id:
@@ -57,12 +53,12 @@ def result_detail(result_id: str):
     raise HTTPException(404, "Result not found")
 
 
-@app.get("/issues")
+@official_router.get("/issues")
 def issues(domain: str | None = Query(None, pattern="^(solar|rag)$")):
     return store().issues(domain, include_excluded=False)
 
 
-@app.get("/documents/{document_id}/file")
+@official_router.get("/documents/{document_id}/file")
 def document_file(document_id: str):
     for item in store().documents():
         if item["document_id"] == document_id:
@@ -77,7 +73,7 @@ def document_file(document_id: str):
     raise HTTPException(404, "Document not found")
 
 
-@app.get("/export/project-passport.pdf", response_class=Response,
+@official_router.get("/export/project-passport.pdf", response_class=Response,
          responses={200: {"content": {"application/pdf": {}}}})
 def project_passport(
     run_id: str = Query(min_length=1),
@@ -96,7 +92,7 @@ def project_passport(
         with mupdf_lock:
             content = render_project_passport(store(), run_id=run_id, domain=domain,
                                               publication_id=publication_id, generated_at=generated_at,
-                                              version=app.version)
+                                              version=VERSION)
     except PublicationNotFound as exc:
         raise HTTPException(404, str(exc)) from exc
     except AmbiguousPublication as exc:
@@ -114,8 +110,40 @@ def project_passport(
     })
 
 
-@app.get("/export/{artifact}")
+@official_router.get("/export/{artifact}")
 def export(artifact: str):
     if artifact not in ("documents.json", "results.json", "issues.json"):
         raise HTTPException(404, "Official CSV export requires participant templates")
     return store().read(artifact)
+
+
+def create_app():
+    multiuser = auth_mode() == "multiuser"
+    app = FastAPI(title="Scientific PDF Intelligence API", version=VERSION,
+                  openapi_url=None if multiuser else "/openapi.json",
+                  redirect_slashes=not multiuser)
+    app.add_api_route("/health", health, methods=["GET"])
+    app.include_router(upload_router)
+    if multiuser:
+        config = AuthConfig.from_env()
+        install_auth(app, config)
+        app.add_middleware(
+            CORSMiddleware, allow_origins=list(config.origins), allow_credentials=True,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["X-SPI-CSRF", "X-SPI-Snapshot-SHA256", "X-SPI-Session-ID"],
+            expose_headers=["X-SPI-Upload-Max-Bytes", "X-SPI-Snapshot-SHA256", "Content-Disposition", "Retry-After"],
+        )
+        app.add_middleware(SecurityMiddleware, config=config)
+    else:
+        app.include_router(official_router)
+        app.add_api_route("/auth/config", lambda: JSONResponse(
+            {"mode": "private"}, headers={"Cache-Control": "no-store"}), methods=["GET"])
+        origins = [origin.strip() for origin in os.getenv("SPI_CORS_ORIGINS", "").split(",") if origin.strip()]
+        if origins:
+            app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET"],
+                               expose_headers=["X-SPI-Generated-At"])
+    return app
+
+
+load_project_env()
+app = create_app()

@@ -11,7 +11,7 @@ import type { StoredUpload, UploadClient } from '../data';
 import { formatValue, sourceLabel } from '../domain';
 import { useData } from '../hooks/useData';
 import { Link, uploadAnalysisUrl } from '../navigation';
-import { uploadClient } from '../provider';
+import { useUploadClient } from '../provider';
 import { isApproved } from '../upload-review';
 import { metricTitle } from './ResultDetailPage';
 
@@ -86,7 +86,7 @@ function UploadAnalysis({ api, upload, token }: UploadViewProps) {
 export function UploadAnalysisPage({ uploadId, resultId, ...credentials }: UploadCredentials & {
   uploadId: string; resultId: string | null;
 }) {
-  const api = uploadClient;
+  const api = useUploadClient();
   return (
     <>
       <PageHeading title={resultId ? 'Источник научной записи' : 'Результаты анализа PDF'}
