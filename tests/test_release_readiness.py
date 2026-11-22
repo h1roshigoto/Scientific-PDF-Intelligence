@@ -274,3 +274,55 @@ def test_all_pdfs_cli_blocks_partial_science_and_preview_keeps_status(tmp_path, 
     assert {row.result_id: row.extraction_status for row in store.results('solar')}[
         'solar:P001:unreviewed'
     ] == 'needs_review'
+
+@pytest.mark.parametrize('track', ['solar', 'rag'])
+def test_submission_projection_keeps_registered_metadata_and_explicit_result_context(tmp_path, monkeypatch, track):
+    args = make_release(tmp_path, monkeypatch, 'ready')
+    store = Store(args.state)
+    docs = store.documents()
+    target = next(doc for doc in docs if doc['domain'] == track and doc['publication_id'] == 'P001')
+    target.update(title='Подтвержденная работа', year=2024, DOI='10.1234/test', authors='А. Автор; Б. Автор')
+    store.write('documents.json', docs)
+
+    results = store.read('results.json')
+    expected_context = (
+        {'spread_value': '0.05', 'n_devices': 3, 'time_point': '25', 'time_unit': 'h'}
+        if track == 'solar' else
+        {'metric_group': 'retrieval', 'metric_direction': 'higher', 'baseline_value': '0.4', 'sample_size': 21}
+    )
+    for result in results:
+        if result['document_id'] == target['document_id']:
+            result['context'].update(expected_context)
+    store.write('results.json', results)
+
+    all_docs = {doc['document_id']: doc for doc in docs}
+    decisions = review_scope.validate_review(
+        all_docs, {}, builder.read_queue(args.queue),
+        builder.read_approval(args.approval), args.baseline, args.root,
+    )
+    submission = store_export.project_submission(
+        store, load_schema(track), args.root / 'data' / track / 'test',
+        publication_ids=['P001', 'P002'],
+        reviewed_scopes={(decision.document_id, decision.pdf_sha256): decision
+                         for decision in decisions.values()},
+    )
+    publication, excluded = submission.tables['publications']
+    assert publication == {
+        'publication_id': 'P001', 'title': 'Подтвержденная работа', 'year': 2024,
+        'DOI': '10.1234/test', 'authors': 'А. Автор; Б. Автор',
+        'in_scope': True, 'exclusion_reason': None,
+    }
+    assert excluded['title'] is None and excluded['DOI'] is None and excluded['authors'] is None
+    assert excluded['year'] is None
+
+    result = next(row for row in submission.tables['results'] if row['result_origin'] == 'primary')
+    assert {key: result[key] for key in expected_context} == expected_context
+    output = tmp_path / f'candidate-{track}'
+    from spi.csv_export import export_submission
+    export_submission(load_schema(track), submission, output, publication_ids=['P001', 'P002'])
+    actual = read_submission(load_schema(track), output).tables
+    assert actual['publications'][0]['title'] == 'Подтвержденная работа'
+    assert actual['publications'][0]['year'] == '2024'
+    assert actual['publications'][0]['DOI'] == '10.1234/test'
+    assert actual['publications'][0]['authors'] == 'А. Автор; Б. Автор'
+    assert all(actual['results'][0][key] == str(value) for key, value in expected_context.items())

@@ -129,8 +129,17 @@ def project_submission(
                 "and record the decision with python -m spi.publication_scope before exporting."
             )
         in_scope = decision.status == "in_scope"
-        tables["publications"].append({"publication_id": pid, "in_scope": in_scope,
-                                       "exclusion_reason": None if in_scope else decision.reason})
+        # Only registered fields are projected. Embedded-PDF metadata and worksheet hints
+        # are unconfirmed candidates and must not silently enter a submission.
+        tables["publications"].append({
+            "publication_id": pid,
+            "title": doc.get("title"),
+            "year": doc.get("year"),
+            "DOI": doc.get("DOI") or doc.get("doi"),
+            "authors": doc.get("authors") or doc.get("author"),
+            "in_scope": in_scope,
+            "exclusion_reason": None if in_scope else decision.reason,
+        })
         if in_scope:
             included[document_id] = doc
 
@@ -166,7 +175,15 @@ def project_submission(
         if result.context.get("metric_definition"):
             notes.append(f"Metric definition: {result.context['metric_definition']}")
         metric = result.normalized if result.normalized.value is not None else result.raw
+        # Preserve explicitly saved result-level context. Never infer entity links,
+        # duplicate_of, missing metrics, or scientific values during projection.
+        context_fields = (
+            ("spread_value", "n_devices", "time_point", "time_unit") if schema.domain == "solar"
+            else ("metric_group", "metric_direction", "baseline_value", "sample_size")
+        )
+        saved_context = {field: result.context[field] for field in context_fields if field in result.context}
         tables["results"].append({
+            **saved_context,
             **_related_rows(result, tables, pid, schema),
             "publication_id": pid, "result_id": result.result_id,
             "metric_name": result.metric.name, "metric_value": metric.value, "metric_unit": metric.unit,
