@@ -1,0 +1,220 @@
+x-runtime: &runtime
+  image: spi-runtime:${SPI_IMAGE_TAG:-local}
+  pull_policy: never
+  user: "10001:10001"
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 64
+  cpus: 1.0
+  mem_limit: 768m
+  ulimits:
+    nofile: {soft: 1024, hard: 1024}
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=128m,mode=1777"]
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+
+x-app-env: &app-env
+  SPI_DEPLOYMENT: "true"
+  SPI_AUTH_MODE: multiuser
+  SPI_AUTH_LOCAL_DEVELOPMENT: "false"
+  SPI_AUTH_COOKIE_SECURE: "true"
+  SPI_AUTH_CSRF_ENABLED: "true"
+  SPI_RATE_LIMIT_ENABLED: "true"
+  SPI_PUBLIC_DEMO_ENABLED: "false"
+  SPI_AUTH_DB: /state-auth/auth.sqlite3
+  SPI_MULTIUSER_STORAGE_ROOT: /state-tenants
+  SPI_AUTH_TRUSTED_PROXIES: ${SPI_PROXY_IP:-10.93.31.2}
+  SPI_GLOBAL_MAX_ACTIVE_JOBS: ${SPI_GLOBAL_MAX_ACTIVE_JOBS:-2}
+  SPI_USER_MAX_UPLOAD_FILES: ${SPI_USER_MAX_UPLOAD_FILES:-100}
+  SPI_USER_MAX_TOTAL_STORAGE_BYTES: ${SPI_USER_MAX_TOTAL_STORAGE_BYTES:-524288000}
+  SPI_USER_MAX_PDF_BYTES: ${SPI_USER_MAX_PDF_BYTES:-26214400}
+  SPI_USER_MAX_ACTIVE_JOBS: ${SPI_USER_MAX_ACTIVE_JOBS:-1}
+  SPI_USER_MAX_QUEUED_JOBS: ${SPI_USER_MAX_QUEUED_JOBS:-4}
+  SPI_UPLOAD_PROCESS_GIGACHAT: "false"
+  SPI_DISK_MIN_FREE_BYTES: ${SPI_DISK_MIN_FREE_BYTES:-134217728}
+  SPI_WORKER_JOB_TIMEOUT: "240"
+  SPI_PDF_SOCKET: /parser/pdf.sock
+
+x-app-volumes: &app-volumes
+  - type: volume
+    source: dataset
+    target: /state-auth
+    volume: {subpath: state/auth}
+  - type: volume
+    source: dataset
+    target: /state-tenants
+    volume: {subpath: state/tenants}
+  - type: volume
+    source: dataset
+    target: /coord
+    volume: {subpath: coord}
+  - parser:/parser:ro
+  - metrics:/metrics
+
+services:
+  initialize:
+    <<: *runtime
+    network_mode: none
+    command: [python, -m, spi.ops.runtime, initialize]
+    volumes: [dataset:/dataset]
+
+  api:
+    <<: *runtime
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command:
+      - python
+      - -m
+      - spi.ops.runtime
+      - serve
+      - python
+      - -m
+      - uvicorn
+      - spi.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --no-proxy-headers
+      - --no-access-log
+      - --no-server-header
+      - --timeout-graceful-shutdown
+      - "35"
+      - --limit-concurrency
+      - "32"
+    environment: *app-env
+    volumes: *app-volumes
+    networks: [backend]
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+      sandbox: {condition: service_healthy}
+    stop_grace_period: 45s
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -m, spi.ops.runtime, api-health]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    <<: *runtime
+    command: [python, -m, spi.ops.runtime, serve, python, -m, spi.upload_worker]
+    environment:
+      <<: *app-env
+      SPI_ROLE: worker
+    volumes: *app-volumes
+    network_mode: none
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+      sandbox: {condition: service_healthy}
+      api: {condition: service_healthy}
+    stop_grace_period: 45s
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -m, spi.ops.runtime, worker-health]
+      interval: 10s
+      timeout: 5s
+      retries: 4
+      start_period: 10s
+
+  sandbox:
+    <<: *runtime
+    command: [python, -m, spi.ops.pdf_sandbox, serve]
+    network_mode: none
+    pids_limit: 16
+    mem_limit: 512m
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
+    volumes: [parser:/parser]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, python, -m, spi.ops.pdf_sandbox, check]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+
+  proxy:
+    image: spi-proxy:${SPI_IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    user: "10002:10002"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    sysctls: {net.ipv4.ip_unprivileged_port_start: "0"}
+    cpus: 0.5
+    mem_limit: 192m
+    pids_limit: 64
+    ulimits:
+      nofile: {soft: 1024, hard: 1024}
+    volumes: [proxy-data:/data, proxy-config:/config]
+    networks:
+      backend: {ipv4_address: "${SPI_PROXY_IP:-10.93.31.2}"}
+      edge: {}
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+    environment:
+      SPI_PROXY_UPLOAD_BYTES: ${SPI_PROXY_UPLOAD_BYTES:-26345472}
+
+  backup:
+    <<: *runtime
+    profiles: [ops]
+    network_mode: none
+    entrypoint: [python, -m, spi.ops.backup]
+    command: [create]
+    volumes:
+      - dataset:/dataset:ro
+      - backups:/backups
+      - metrics:/metrics
+
+  restore:
+    <<: *runtime
+    profiles: [ops]
+    network_mode: none
+    entrypoint: [python, -m, spi.ops.restore]
+    volumes:
+      - dataset:/dataset
+      - backups:/backups:ro
+      - metrics:/metrics
+
+  monitoring:
+    <<: *runtime
+    command: [python, -m, spi.ops.runtime, monitor]
+    network_mode: none
+    mem_limit: 128m
+    cpus: 0.25
+    environment:
+      SPI_DISK_MIN_FREE_BYTES: ${SPI_DISK_MIN_FREE_BYTES:-134217728}
+    volumes: [metrics:/metrics:ro]
+    depends_on:
+      initialize: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+networks:
+  edge:
+    ipam:
+      config: [{subnet: "${SPI_EDGE_SUBNET:-10.93.31.16/28}"}]
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${SPI_BACKEND_SUBNET:-10.93.31.0/28}
+          ip_range: ${SPI_BACKEND_DYNAMIC_RANGE:-10.93.31.8/29}
+
+volumes:
+  dataset: {}
+  backups: {}
+  parser: {}
+  metrics: {}
+  proxy-data: {}
+  proxy-config: {}

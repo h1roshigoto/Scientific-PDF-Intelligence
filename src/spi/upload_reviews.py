@@ -11,6 +11,7 @@ from secrets import token_hex
 
 import pymupdf
 
+from . import pdf_boundary
 from .batch_evidence import EvidenceError, normalize
 from .models import ResultRecord, UploadProcessing
 from .review_models import (
@@ -373,11 +374,19 @@ class UploadReviews:
         )
 
     def _check_page(self, page, evidence_mode):
-        with mupdf_lock, pymupdf.open(stream=self.pdf_content, filetype="pdf") as pdf:
-            if pdf.page_count != self.upload.page_count:
+        if not 1 <= page <= self.upload.page_count:
+            raise ReviewError(422, "review_page_outside_pdf")
+        if pdf_boundary.enabled():
+            response = pdf_boundary.request("evidence", self.pdf_content, page=page)
+            count, has_text = response.get("pages"), response.get("has_text")
+            if response["status"] != "ok" or type(count) is not int or type(has_text) is not bool:
                 raise ReviewError(409, "review_pdf_changed")
-            if not 1 <= page <= pdf.page_count:
-                raise ReviewError(422, "review_page_outside_pdf")
-            if evidence_mode == "text" and (page in self.processing.pages_needing_ocr
-                                            or not pdf[page - 1].get_text().strip()):
-                raise ReviewError(422, "review_visual_evidence_required")
+        else:
+            with mupdf_lock, pymupdf.open(stream=self.pdf_content, filetype="pdf") as pdf:
+                count, has_text = pdf.page_count, (
+                    page <= pdf.page_count and evidence_mode == "text" and bool(pdf[page - 1].get_text().strip())
+                )
+        if count != self.upload.page_count:
+            raise ReviewError(409, "review_pdf_changed")
+        if evidence_mode == "text" and (page in self.processing.pages_needing_ocr or not has_text):
+            raise ReviewError(422, "review_visual_evidence_required")

@@ -30,6 +30,8 @@ class Store:
                 temporary = Path(temp.name)
                 json.dump(data, temp, ensure_ascii=False, indent=2)
                 temp.write("\n")
+                temp.flush()
+                os.fsync(temp.fileno())
             os.replace(temporary, target)
         finally:
             if temporary is not None:

@@ -6,6 +6,7 @@ from base64 import urlsafe_b64decode
 from dataclasses import dataclass, field
 from ipaddress import ip_address, ip_network
 from pathlib import Path
+from stat import S_IMODE
 from urllib.parse import urlsplit
 
 from .upload_store import PROJECT_ROOT, _overlap, _path_aliases, _positive_limit, private_path, private_sqlite_path
@@ -48,6 +49,23 @@ def check_separate(*paths: Path) -> None:
         if not path.is_absolute() or _overlap(aliases, seen):
             raise ValueError("Data paths must be absolute and separate from one another and the official Store")
         seen.update(aliases)
+
+
+def _secret_text():
+    direct = os.getenv("SPI_AUTH_SECRET", "")
+    source = os.getenv("SPI_AUTH_SECRET_FILE")
+    if not source:
+        return direct
+    if direct:
+        raise ValueError("Specify one auth secret source")
+    path = Path(source)
+    if not path.is_absolute():
+        raise ValueError("SPI_AUTH_SECRET_FILE must be absolute")
+    private_path(path.parent, Path(path.name))
+    if S_IMODE(path.stat().st_mode) & 0o077:
+        raise ValueError("SPI_AUTH_SECRET_FILE must be private")
+    with path.open("rb") as stream:
+        return stream.read(46).decode("ascii").removesuffix("\r\n").removesuffix("\n")
 
 
 @dataclass(frozen=True)
@@ -122,7 +140,7 @@ class AuthConfig:
         proxies = tuple(ip_network(item, strict=True) for item in values("SPI_AUTH_TRUSTED_PROXIES"))
         if any(net.prefixlen != net.max_prefixlen for net in proxies):
             raise ValueError("Trusted proxies must be individual IP addresses")
-        secret_text = os.getenv("SPI_AUTH_SECRET", "")
+        secret_text = _secret_text()
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", secret_text):
             raise ValueError("SPI_AUTH_SECRET must be a random token_urlsafe(32) value")
         secret = urlsafe_b64decode(secret_text + "=")

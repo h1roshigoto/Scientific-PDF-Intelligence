@@ -432,3 +432,16 @@ curl.exe -fS -D - "$spiPassport&domain=rag&publication_id=D001" -o "$env:TEMP/sp
 
 See the [frontend handoff](FRONTEND_HANDOFF.md) for Windows startup, CORS,
 D001 source links, and end-to-end verification.
+## Production transport
+
+The Caddy image serves the static React build and strips `/api` before
+forwarding existing FastAPI paths. Cookie sessions and unsafe requests use the
+same public HTTPS origin. The configured immediate proxy is the only peer
+allowed to provide `X-Forwarded-For` and `X-Forwarded-Proto`. Caddy overwrites
+both from the connection and FastAPI starts with Uvicorn proxy parsing disabled.
+HTML and API responses use `Cache-Control: no-store`. Fingerprinted assets are
+immutable. The proxy blocks access to `/__ops/ready`, and the application
+also requires an immediate loopback peer for that endpoint. `/api/health`
+returns only liveness. Storage exhaustion can return 507 `storage_full`, and
+unavailability of the configured parser can return 503 `pdf_parser_unavailable`.
+See [Deployment](DEPLOYMENT.md).

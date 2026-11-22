@@ -43,6 +43,17 @@ bearer = HTTPBearer(auto_error=False)
 NO_STORE = {"Cache-Control": "no-store"}
 STORAGE_ERRORS = (OSError, sqlite3.Error, ValueError)
 MULTIPART_OVERHEAD = 64 * 1024
+
+
+def _storage_error(exc, fallback):
+    from .ops.state import disk_full
+    from .pdf_boundary import ParserUnavailable
+
+    if disk_full(exc):
+        return _error(507, "storage_full")
+    if isinstance(exc, ParserUnavailable):
+        return _error(503, "pdf_parser_unavailable")
+    return _error(500, fallback)
 UploadId = Annotated[str, Path(pattern=UPLOAD_ID_PATTERN)]
 
 
@@ -180,7 +191,7 @@ async def create_upload(request: Request, response: Response, uploads: PrivateSt
         raise _error(409, "upload_quota_full") from exc
     except STORAGE_ERRORS as exc:
         logger.error("Private upload write failed (%s)", type(exc).__name__)
-        raise _error(500, "upload_storage_error") from exc
+        raise _storage_error(exc, "upload_storage_error") from exc
 
     response.headers.update(NO_STORE)
     return upload
@@ -327,7 +338,7 @@ def _reviews(upload_id, response, uploads, *, write=False):
         raise _error(exc.status, exc.code) from exc
     except (*STORAGE_ERRORS, RuntimeError) as exc:
         logger.error("Private review operation failed (%s)", type(exc).__name__)
-        raise _error(500, "upload_review_storage_error") from exc
+        raise _storage_error(exc, "upload_review_storage_error") from exc
 
 
 @review_router.get("/{upload_id}/reviews", response_model=ReviewOverview)
@@ -383,7 +394,7 @@ def _export_operation():
         raise _error(exc.status, exc.code) from exc
     except (*STORAGE_ERRORS, RuntimeError) as exc:
         logger.error("Private export operation failed (%s)", type(exc).__name__)
-        raise _error(500, "upload_export_storage_error") from exc
+        raise _storage_error(exc, "upload_export_storage_error") from exc
 
 
 def _snapshot(upload_id, uploads, expected=None, *, request=None):

@@ -4,19 +4,24 @@ import argparse
 import logging
 import os
 import re
+import signal
 import sqlite3
 from collections import deque
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 from pathlib import Path
-from time import sleep
+from time import sleep, time
 
-from .auth_config import AuthConfig, auth_mode
+from .auth_config import AuthConfig, auth_mode, flag
 from .auth_store import AuthError, AuthStore
 from .batch import run_batch
 from .config import load_project_env
 from .gigachat import GigaChatClient, GigaChatError, GigaChatSettings
 from .models import ProcessingCounts, ProcessingPage
+from .ops.state import disk_full
+from .ops.telemetry import SafeFormatter, event, snapshot, worker_metric_name
+from .pdf_boundary import ParserUnavailable, enabled as parser_enabled
+from .pdf_layout import read_layout, remote_layout
 from .tenant_storage import DAY, tenant_lease, tenant_queue, tenant_root, tenant_store, worker_slot
 from .upload_processing import UploadProcessingStore
 from .upload_queue import UploadQueue
@@ -27,6 +32,29 @@ logger = logging.getLogger(__name__)
 
 class ProcessingFailure(ValueError):
     """A diagnostic code suitable for the authenticated status endpoint."""
+
+
+class JobDeadline(Exception):
+    pass
+
+
+@contextmanager
+def job_deadline():
+    limit = int(os.getenv("SPI_WORKER_JOB_TIMEOUT", "0"))
+    if not limit:
+        yield
+        return
+
+    def expired(*_):
+        raise JobDeadline
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, limit)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _input(uploads, job):
@@ -101,12 +129,30 @@ class UploadWorker:
         with self.queue.claim() as job:
             if job is None:
                 return False
+            if flag("SPI_DEPLOYMENT"):
+                heartbeat("processing")
             try:
-                self._process(job)
-            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
-                code = str(exc) if isinstance(exc, ProcessingFailure) else "processing_error"
+                with job_deadline():
+                    self._process(job)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error, JobDeadline) as exc:
+                code = "processing_error"
+                if isinstance(exc, ProcessingFailure):
+                    code = str(exc)
+                elif isinstance(exc, JobDeadline):
+                    code = "processing_timeout"
+                elif isinstance(exc, ParserUnavailable):
+                    code = "pdf_parser_unavailable"
+                elif disk_full(exc):
+                    code = "storage_full"
                 logger.warning("Upload job %s failed: %s (%s)", job.processing.job_id, code, type(exc).__name__)
-                self.queue.update(job, status="failed", step="finished", diagnostic=code, retry_allowed=True)
+                try:
+                    self.queue.update(job, status="failed", step="finished", diagnostic=code, retry_allowed=True)
+                except (OSError, sqlite3.Error) as write_error:
+                    if not disk_full(write_error):
+                        raise
+                    # The persisted job remains recoverable after capacity returns.
+                    logger.warning("Upload job failure status deferred (storage_full)")
+                    sleep(2)
             return True
 
     def _process(self, job):
@@ -145,6 +191,7 @@ class UploadWorker:
                 store, [path], upload.domain, local_only=mode == "local",
                 complete=complete, max_requests=remaining,
                 pdf_content=content, retry_invalid_completion=True,
+                layout_reader=remote_layout if parser_enabled() else read_layout,
             )
         self.queue.update(job, step="checking_results")
         _finish(self.queue, job, store)
@@ -189,11 +236,23 @@ class MultiuserWorker:
                                 model_enabled=self.model_enabled, max_requests=config.job_requests).run_one()
 
 
+def heartbeat(state):
+    snapshot(worker_metric_name(), {"sample_time": time(), "state": state})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Process at most one available job and exit")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    deployed = flag("SPI_DEPLOYMENT")
+    if deployed:
+        from .ops.runtime import collect_storage
+
+        handler = logging.StreamHandler()
+        handler.setFormatter(SafeFormatter())
+        logging.basicConfig(level=logging.INFO, handlers=[handler])
+    else:
+        logging.basicConfig(level=logging.INFO)
     load_project_env()
     try:
         model_enabled = os.getenv("SPI_UPLOAD_PROCESS_GIGACHAT", "").strip().lower() in {"1", "true"}
@@ -211,11 +270,24 @@ def main():
         parser.error("Invalid worker configuration. Check authentication, storage and model request limit (1–32).")
 
     logger.info("Private upload worker ready")
+    stopping = False
+    last_storage_sample = 0
+
+    def shutdown(*_):
+        nonlocal stopping
+        stopping = True
+
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         with ExitStack() as resources:
             if isinstance(worker, UploadWorker):
                 resources.enter_context(storage_lease(worker.uploads.state))
-            while True:
+            while not stopping:
+                if deployed:
+                    heartbeat("idle")
+                    if time() - last_storage_sample >= 10:
+                        collect_storage(worker.config)
+                        last_storage_sample = time()
                 worked = worker.run_one()
                 if args.once:
                     return
@@ -223,6 +295,10 @@ def main():
                     sleep(1)
     except KeyboardInterrupt:
         return
+    finally:
+        if deployed:
+            heartbeat("stopped")
+            event("worker", "stopped")
 
 
 if __name__ == "__main__":
