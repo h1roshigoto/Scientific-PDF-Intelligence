@@ -251,7 +251,7 @@ def publication_metadata(doc, sheet, pdf_metadata):
         if not candidate and field == "title" and sheet.get("title"):
             candidate, source = sheet["title"], "approval_worksheet_title"
         fields[field] = {"store_value": stored, "store_status": "available" if stored else "missing",
-                         "export_mapping": "ignored_by_exporter" if stored else "unmapped",
+                         "export_mapping": "mapped_from_store" if stored else "unmapped",
                          "candidate_value": candidate, "candidate_source": source,
                          "confirmation": "source_unconfirmed" if stored or candidate else "unknown"}
     return fields
@@ -461,7 +461,7 @@ def diagnose_document(doc, checkpoint, results, issues, decision, saved_scope, q
 
     fields = publication_metadata(doc, sheet, pdf_metadata)
     unconfirmed = [name for name, field in fields.items() if field["confirmation"] != "confirmed"]
-    ignored = [name for name, field in fields.items() if field["store_status"] == "available"]
+    ignored = [name for name, field in fields.items() if field["export_mapping"] == "ignored_by_exporter"]
     if unconfirmed:
         add("METADATA_UNCONFIRMED", "publication_metadata.fields", unconfirmed)
     if ignored:

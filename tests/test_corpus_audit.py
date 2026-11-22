@@ -151,7 +151,7 @@ def test_partial_conditions(corpus, tmp_path, changes, expected):
         assert row["scientific_unresolved_count"] == 0
 
 
-def test_complete_scoped_record_and_unmapped_metadata(corpus, tmp_path):
+def test_complete_scoped_record_and_projected_but_unconfirmed_metadata(corpus, tmp_path):
     doc = corpus.add(scope="in_scope", DOI="10.0000/audit-fixture")
     corpus.store.save_batch_document(checkpoint(
         doc, "processed", fragments={"f1": done(result(doc))}, scope_status_at_run="in_scope"
@@ -162,7 +162,8 @@ def test_complete_scoped_record_and_unmapped_metadata(corpus, tmp_path):
     row = report["documents"][0]
     assert code == 0 and row["partial_causes_json"] == [] and row["verified_count"] == 1
     assert row["scientific_gate_blockers"] == []
-    assert row["publication_metadata"]["DOI"]["export_mapping"] == "ignored_by_exporter"
+    assert row["publication_metadata"]["DOI"]["export_mapping"] == "mapped_from_store"
+    assert "METADATA_NOT_EXPORTED" not in row["diagnosed_causes"]
     assert row["publication_metadata"]["title"]["candidate_source"] == "embedded_pdf_metadata"
     assert row["publication_metadata"]["year"]["confirmation"] == "unknown"
     assert report["scientific_release"]["gates"]["solar"]["release_ready"]
