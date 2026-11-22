@@ -166,3 +166,48 @@ def test_resumable_manifest_requires_matching_model_and_policy(tmp_path):
     path.write_text('{"policy": "untrusted", "records": []}')
     with pytest.raises(ValueError, match="Invalid machine-scope manifest"):
         auto._machine_records(path)
+
+
+from threading import Barrier
+
+def test_passes_can_start_concurrently_and_timing_is_reported(tmp_path, monkeypatch):
+    row, _ = make_pdf(tmp_path)
+    rendezvous = Barrier(2)
+
+    def two_calls_must_overlap(prompt, model, timeout):
+        rendezvous.wait(timeout=10)
+        return answer()
+
+    monkeypatch.setattr(auto, "call_codex", two_calls_must_overlap)
+    record = auto.audit_one(row, tmp_path, "gpt-6.2-sol", 10, parallel=True)
+    assert record["status"] == "in_scope"
+    assert len(record["passes"]) == 2
+    assert record["timing_ms"]["first_pass"] >= 0
+    assert record["timing_ms"]["second_pass"] >= 0
+    assert record["timing_ms"]["total"] >= 0
+    assert record["pdf_text_chars"] > 0
+
+
+def test_sequential_mode_abstains_after_invalid_first_pass(tmp_path, monkeypatch):
+    row, _ = make_pdf(tmp_path)
+    responses = []
+
+    def invalid_first(prompt, model, timeout):
+        responses.append(prompt)
+        return {"status": "needs_review", "reason": "Unclear", "evidence": []}
+
+    monkeypatch.setattr(auto, "call_codex", invalid_first)
+    record = auto.audit_one(row, tmp_path, "gpt-6.2-sol", 10, parallel=False)
+    assert record["status"] == "needs_review"
+    assert len(responses) == 1
+    assert len(record["passes"]) == 1
+    assert "second pass skipped" in record["reason"]
+
+
+def test_sequential_mode_still_requires_two_passes_for_acceptance(tmp_path, monkeypatch):
+    row, _ = make_pdf(tmp_path)
+    calls = []
+    monkeypatch.setattr(auto, "call_codex", lambda *args: calls.append(1) or answer())
+    record = auto.audit_one(row, tmp_path, "gpt-6.2-sol", 10, parallel=False)
+    assert record["status"] == "in_scope"
+    assert len(calls) == 2
