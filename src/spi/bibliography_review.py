@@ -137,16 +137,16 @@ def write_review_sheet(store: Store, destination: Path, *, domain="all", publica
     if any(destination == folder or folder in destination.parents for folder in source_folders):
         raise ValueError("Review sheet cannot be written inside the original PDF folder")
     # x mode makes pre-existing review files untouchable even under a race.
+    created = False
     try:
         with destination.open("x", encoding="utf-8-sig", newline="") as file:
+            created = True
             writer = csv.DictWriter(file, fieldnames=FIELDS, lineterminator="\r\n")
             writer.writeheader()
             writer.writerows(rows)
     except BaseException:
-        # If an existing file prevented creation, never unlink it.
-        if not destination.exists():
-            raise
-        # No exception path should damage an existing sheet.
+        if created:
+            destination.unlink(missing_ok=True)
         raise
     return len(rows)
 
