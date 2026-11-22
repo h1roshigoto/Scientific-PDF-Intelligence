@@ -74,7 +74,7 @@ spi=(docker compose --env-file /srv/spi/compose.env -f compose.yaml -f compose.p
 | `SPI_AUTH_DB`, `SPI_MULTIUSER_STORAGE_ROOT` | Фиксированные пути в контейнере `/state-auth/auth.sqlite3` и `/state-tenants` |
 | `SPI_GLOBAL_MAX_ACTIVE_JOBS`, `SPI_USER_MAX_ACTIVE_JOBS`, `SPI_USER_MAX_QUEUED_JOBS` | `2`, `1`, `4` |
 | `SPI_USER_MAX_UPLOAD_FILES`, `SPI_USER_MAX_TOTAL_STORAGE_BYTES`, `SPI_USER_MAX_PDF_BYTES` | `100`, `524288000`, `26214400`. Параметр оригиналов называется `SPI_USER_MAX_TOTAL_STORAGE_BYTES` |
-| `SPI_PROXY_UPLOAD_BYTES` | `26345472`, совпадает с лимитом PDF плюс 64 KiB multipart |
+| `SPI_PROXY_UPLOAD_BYTES` | `26345472`, 25 MiB PDF плюс 128 KiB резерва Caddy. FastAPI применяет свой лимит multipart |
 | `SPI_DISK_MIN_FREE_BYTES`, `SPI_WORKER_JOB_TIMEOUT` | `134217728`, Compose фиксирует 240 секунд на задачу |
 | `SPI_UPLOAD_PROCESS_GIGACHAT` | Compose фиксирует `false`. Для standalone private mode см. [GIGACHAT_SMOKE.md](GIGACHAT_SMOKE.md) |
 | `SPI_RUNTIME_REPOSITORY`, `SPI_RUNTIME_DIGEST` | Registry repository и платформенный OCI digest runtime |

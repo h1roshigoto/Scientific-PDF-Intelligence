@@ -37,7 +37,7 @@ jobs:
           docker compose --env-file .env.production.example -f compose.yaml -f compose.production.yaml config --quiet
           docker buildx create --name spi-release --driver docker-container --use
           sh deploy/scripts/build-release.sh build-images
-          for image in runtime proxy; do docker load -i "build-images/$image.tar"; done
+          sh deploy/scripts/load-release.sh build-images
           docker run --rm --network none spi-runtime:local python -c 'import fastapi, pymupdf, spi.api, spi.upload_worker'
           docker run --rm --network none -e SPI_SITE=https://localhost:8443 spi-proxy:local caddy adapt --config /etc/caddy/Caddyfile.local --validate
           docker run --rm --network none -e SPI_SITE=spi.example.org spi-proxy:local caddy adapt --config /etc/caddy/Caddyfile.production
@@ -64,7 +64,7 @@ jobs:
           path: build-images
       - name: Running containers and image layers
         run: |
-          for image in runtime proxy; do docker load -i "build-images/$image.tar"; done
+          sh deploy/scripts/load-release.sh build-images
           docker compose --env-file /dev/null -p spi-security -f compose.yaml -f compose.local.yaml up --no-build -d --wait
           python deploy/scripts/container_check.py --project spi-security --layers | tee container-controls.log
       - name: Python dependency audit
@@ -169,7 +169,7 @@ jobs:
         with:
           name: spi-oci-images
           path: build-images
-      - run: for image in runtime proxy; do docker load -i "build-images/$image.tar"; done
+      - run: sh deploy/scripts/load-release.sh build-images
       - run: |
           python -m pip install --require-hashes -r deploy/requirements.lock
           python -m pip install --no-deps -e .

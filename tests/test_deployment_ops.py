@@ -107,8 +107,9 @@ def test_parser_rejects_oversized_reply_and_disconnect():
                 pdf_boundary.receive(client, pdf_boundary.MAX_RESPONSE_BYTES, monotonic() + 1)
 
 
-def test_production_pdf_cannot_select_local_fallback(monkeypatch):
-    monkeypatch.setenv("SPI_DEPLOYMENT_PROFILE", "production")
+@pytest.mark.parametrize(("setting", "value"), [("SPI_DEPLOYMENT_PROFILE", "production"), ("SPI_DEPLOYMENT", "true")])
+def test_production_pdf_cannot_select_local_fallback(monkeypatch, setting, value):
+    monkeypatch.setenv(setting, value)
     monkeypatch.delenv("SPI_PDF_SOCKET", raising=False)
     assert pdf_boundary.enabled()
     with pytest.raises(pdf_boundary.ParserUnavailable):

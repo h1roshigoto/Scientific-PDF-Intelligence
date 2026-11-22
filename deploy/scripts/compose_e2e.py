@@ -459,6 +459,67 @@ backup.create('interrupted')
     compose.run("run", "--rm", "--no-deps", "backup", "verify", "interrupted", expected=1)
 
 
+def restore_failures(compose, restore_name):
+    modifications = """
+import io, json, sys, tarfile
+from pathlib import Path
+
+base = Path('/backups')
+with tarfile.open(base / (sys.argv[1] + '.tar')) as original:
+    content = [(item, original.extractfile(item).read()) for item in original]
+
+for scenario in ('hash', 'schema', 'missing', 'sqlite'):
+    manifest = json.loads(content[0][1])
+    documents = content[1:].copy()
+    victim, value = documents[0]
+    if scenario == 'hash':
+        manifest['files'][victim.name]['sha256'] = 'a' * 64
+    elif scenario == 'schema':
+        manifest['schema_version'] = 999
+    elif scenario == 'missing':
+        documents.pop()
+    else:
+        from hashlib import sha256
+        assert victim.name == 'auth/auth.sqlite3'
+        broken = b'not a sqlite database'
+        manifest['files'][victim.name] = {'bytes': len(broken), 'sha256': sha256(broken).hexdigest()}
+        documents[0] = (victim, broken)
+    with tarfile.open(base / ('negative-' + scenario + '.tar'), 'w') as target:
+        for member, data in ((content[0][0], json.dumps(manifest).encode()), *documents):
+            member.size = len(data)
+            target.addfile(member, io.BytesIO(data))
+"""
+    compose.run("run", "--rm", "--no-deps", "--entrypoint", "python", "backup", "-c", modifications, restore_name)
+    for name in ("hash", "schema", "missing", "sqlite"):
+        compose.run("run", "--rm", "--no-deps", "restore", "negative-" + name, expected=1)
+    program = """
+from pathlib import Path
+from time import sleep
+import sys
+from spi.ops import restore
+
+original = restore.read_archive
+def before_publication(source, stage):
+    manifest = original(source, stage)
+    Path('/tmp/spi-restore-verified').touch()
+    sleep(60)
+    return manifest
+
+restore.read_archive = before_publication
+restore.restore(Path('/backups') / (sys.argv[1] + '.tar'))
+"""
+    container = compose.run("run", "-d", "--rm", "--no-deps", "--entrypoint", "python",
+                            "restore", "-c", program, restore_name).splitlines()[-1]
+    try:
+        wait_for(lambda: subprocess.run(["docker", "exec", container, "test", "-f", "/tmp/spi-restore-verified"],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0)
+    finally:
+        subprocess.run(["docker", "kill", container], check=True, stdout=subprocess.DEVNULL)
+    compose.run("run", "--rm", "--no-deps", "--entrypoint", "test", "restore", "!", "-e", "/dataset/state")
+    print("PASS restore rejects bad SHA-256, schema, missing file and corrupt SQLite; interrupted restore stays unpublished",
+          flush=True)
+
+
 def log_check(compose, forbidden):
     logs = compose.run("logs", "--no-color")
     assert all(secret and secret not in logs for secret in forbidden)
@@ -581,6 +642,7 @@ def scenario(primary, restored, directory, *, browser=False, encrypted=False):
                     "Path('/backups/rehearsal.tar').read_bytes()[:2048])")
         primary.run("down")  # Release the network before starting the other project.
         restored.run("run", "--rm", "--no-deps", "restore", "truncated", expected=1)
+        restore_failures(restored, restore_name)
         restored.run("run", "--rm", "--no-deps", "restore", restore_name, "--dry-run")
         restored.run("run", "--rm", "--no-deps", "restore", restore_name)
         restored.run("run", "--rm", "--no-deps", "restore", restore_name, expected=1)
@@ -622,6 +684,8 @@ def browser_check(directory, ca, origin, password, upload_route):
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("Deployment assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", action="store_true")
     parser.add_argument("--browser", action="store_true", help="Use Chromium with an isolated NSS trust store on Linux")

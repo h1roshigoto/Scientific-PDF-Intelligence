@@ -19,4 +19,7 @@ for image in runtime proxy; do
         --label "org.opencontainers.image.revision=$revision" \
         --build-arg "SOURCE_DATE_EPOCH=$epoch" --file "$dockerfile" \
         --output "type=oci,dest=$destination/$image.tar,name=spi-$image:local,rewrite-timestamp=true" .
+    PYTHONPATH=src python3 -c 'import sys; from pathlib import Path; from spi.ops.release import add_docker_manifest
+add_docker_manifest(Path(sys.argv[1]), sys.argv[2], sys.argv[3])' \
+        "$destination/$image.tar" "spi-$image:local" "$revision"
 done

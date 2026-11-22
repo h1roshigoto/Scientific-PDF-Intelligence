@@ -75,7 +75,7 @@ def runtime(compose):
     assert f"SPI_AUTH_TRUSTED_PROXIES={proxy_ip}" in api["Config"]["Env"]
     sandbox = inspected["sandbox"]["Id"]
     probe = """
-import errno, os, resource, socket
+import errno, os, resource, signal, socket
 from pathlib import Path
 from spi.ops.pdf_sandbox import restrict_child
 base = Path('/tmp/spi-boundary-probe')
@@ -84,16 +84,44 @@ document = base / 'document'
 unrelated = base / 'unrelated'
 document.write_text('sample')
 unrelated.write_text('private')
-with (base / 'result').open('wb') as result:
+(base / 'bounded-result').touch()
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+with (base / 'result').open('wb') as result, (base / 'bounded-result').open('wb') as bounded:
     restrict_child(document)
     assert document.read_text() == 'sample'
     result.write(b'allowed')
+    chunk = bytes(1024**2)
+    for _ in range(16):
+        assert os.write(bounded.fileno(), chunk) == len(chunk)
+    try:
+        os.write(bounded.fileno(), b'x')
+    except OSError as exc:
+        assert exc.errno == errno.EFBIG
+    else:
+        raise AssertionError('File-size limit was not enforced')
 assert resource.getrlimit(resource.RLIMIT_CPU) == (15, 15)
 assert resource.getrlimit(resource.RLIMIT_AS) == (384 * 1024**2,) * 2
 assert resource.getrlimit(resource.RLIMIT_FSIZE) == (16 * 1024**2,) * 2
 assert resource.getrlimit(resource.RLIMIT_NOFILE) == (64, 64)
 assert all(not Path(name).exists()
            for name in ('/state-auth', '/state-tenants', '/run/spi-auth-secret', '/local-secret/auth'))
+descriptors = []
+try:
+    for _ in range(64):
+        descriptors.append(os.open(document, os.O_RDONLY))
+except OSError as exc:
+    assert exc.errno == errno.EMFILE
+else:
+    raise AssertionError('Descriptor limit was not enforced')
+finally:
+    for fd in descriptors:
+        os.close(fd)
+try:
+    bytearray(400 * 1024**2)
+except MemoryError:
+    pass
+else:
+    raise AssertionError('Address space limit was not enforced')
 actions = (unrelated.read_bytes, lambda: document.write_text('different'),
            lambda: (base / 'new').touch(), document.unlink, lambda: document.rename(base / 'renamed'),
            lambda: socket.socket(socket.AF_INET), os.fork, lambda: os.execl('/bin/true', 'true'))
@@ -109,7 +137,14 @@ for operation in actions:
     docker("exec", sandbox, "sh", "-ec",
            "cd /tmp/spi-boundary-probe; test \"$(cat document)\" = sample; "
            "test \"$(cat unrelated)\" = private; test \"$(cat result)\" = allowed; "
-           "test ! -e new; test ! -e renamed; rm document unrelated result; rmdir /tmp/spi-boundary-probe")
+           "test \"$(stat -c %s bounded-result)\" = 16777216; test ! -e new; test ! -e renamed; "
+           "rm document unrelated result bounded-result; rmdir /tmp/spi-boundary-probe")
+    cpu_probe = (
+        "import resource\nfrom spi.ops.pdf_sandbox import restrict_child\n"
+        "restrict_child()\nresource.setrlimit(resource.RLIMIT_CPU, (1, 1))\nwhile True:\n    pass\n"
+    )
+    result = subprocess.run(["docker", "exec", sandbox, "python", "-c", cpu_probe], timeout=15)
+    assert result.returncode == 137, "PID did not terminate at its CPU-time limit"
     print("PASS real Landlock, seccomp, parser rlimits, document-only reads and inherited result descriptor")
     program = Path(__file__).with_name("pdf_sandbox_check.py").read_bytes()
     subprocess.run(["docker", "exec", "-i", sandbox, "python", "-"], input=program, check=True)
@@ -195,6 +230,8 @@ assert set(p.name for p in mount.iterdir()) == {'filler', 'checkpoint.json'}
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("Container assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True)
     parser.add_argument("--profile", choices=("local", "production"), default="local")

@@ -2,13 +2,14 @@
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import tarfile
 import tomllib
 from collections import Counter
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -83,7 +84,23 @@ def oci_subject(path, revision=None):
         if revision and config.get("config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != revision:
             raise ValueError("OCI revision label does not match checkout")
     return {"oci_digest": subject["digest"], "archive_index_digest": root["digest"],
-            "config_digest": manifest["config"]["digest"], "diff_ids": config["rootfs"]["diff_ids"]}
+            "config_digest": manifest["config"]["digest"], "diff_ids": config["rootfs"]["diff_ids"],
+            "layer_digests": [layer["digest"] for layer in manifest["layers"]]}
+
+
+def add_docker_manifest(path, tag, revision):
+    """Keep the OCI subject while supplying the import manifest used by classic Docker."""
+    subject = oci_subject(path, revision)
+    digests = [subject["config_digest"], *subject["layer_digests"]]
+    if not all(DIGEST.fullmatch(digest) for digest in digests):
+        raise ValueError("Invalid Docker archive blob digest")
+    config, *layers = [f"blobs/sha256/{digest[7:]}" for digest in digests]
+    payload = json.dumps([{"Config": config, "RepoTags": [tag], "Layers": layers}]).encode()
+    manifest = tarfile.TarInfo("manifest.json")
+    manifest.size = len(payload)
+    manifest.mode = 0o644
+    with tarfile.open(path, mode="a") as archive:
+        archive.addfile(manifest, io.BytesIO(payload))
 
 
 def exception_map(manifest, today):
@@ -167,6 +184,8 @@ def evaluate_release(directory, revision, repository, workflow, checks, specific
         subject = oci_subject(archive, revision)
         scan = directory / f"{image}.json"
         result = scan_result(image, read_json(scan), subject, exceptions)
+        if not now - timedelta(days=1) <= checked_time(result["scan_at"]) <= now + timedelta(minutes=5):
+            raise ValueError(f"{image} scan is stale or future-dated")
         images[image] = {**subject, "archive_sha256": sha256_file(archive), "scan": {
             **result, "sha256": sha256_file(scan)},
             "sbom": verify_sbom(directory / f"{image}.cdx.json", subject)}

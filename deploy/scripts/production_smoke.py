@@ -9,6 +9,8 @@ import httpx
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("Smoke-check assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("origin", help="Exact production HTTPS origin")
     parser.add_argument("--authorized", action="store_true", help="Confirm permitted access to the supplied domain")

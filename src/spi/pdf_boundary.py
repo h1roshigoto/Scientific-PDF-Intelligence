@@ -23,7 +23,8 @@ class ParserUnavailable(OSError):
 
 
 def enabled():
-    return bool(os.getenv("SPI_PDF_SOCKET")) or os.getenv("SPI_DEPLOYMENT_PROFILE") == "production"
+    return (bool(os.getenv("SPI_PDF_SOCKET")) or os.getenv("SPI_DEPLOYMENT_PROFILE") == "production"
+            or os.getenv("SPI_DEPLOYMENT", "").strip().lower() in {"1", "true"})
 
 
 PageNumber = Annotated[int, Field(ge=1, le=MAX_PAGES)]
