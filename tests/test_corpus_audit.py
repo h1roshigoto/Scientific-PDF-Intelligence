@@ -1,6 +1,7 @@
 """Corpora in these tests are synthetic. Real 180-PDF corpus audit is NOT RUN in CI."""
 
 from collections import Counter
+from contextlib import contextmanager
 import csv
 from hashlib import sha256
 import json
@@ -420,3 +421,34 @@ def test_source_change_after_render_emits_only_diagnostic(corpus, tmp_path, monk
     code, report = corpus.audit(output)
     assert code == 2 and "Release files changed" in report["detail"]
     assert [p.name for p in output.iterdir()] == ["diagnostic.json"]
+
+
+def test_copy_does_not_reopen_reserved_sqlite_files(corpus, tmp_path, monkeypatch):
+    corpus.add()
+    corpus.save()
+    with corpus.store.batch_lock():
+        pass
+    corpus.store.upsert("issues.json", {"issue_id": "fixture", "domain": "solar", "rule_id": "fixture",
+                                       "reason": "Synthetic issue"}, "issue_id")
+    original_lock = corpus_audit_inputs.quiescent_store
+    original_fingerprint = corpus_audit_inputs.fingerprint
+    reserved = set()
+
+    @contextmanager
+    def lock(folder, existing):
+        paths = {folder / name for name in corpus_audit_inputs.LOCKS if name in existing}
+        with original_lock(folder, existing):
+            reserved.update(paths)
+            try:
+                yield
+            finally:
+                reserved.difference_update(paths)
+
+    def fingerprint(path):
+        assert path not in reserved
+        return original_fingerprint(path)
+
+    monkeypatch.setattr(corpus_audit_inputs, "quiescent_store", lock)
+    monkeypatch.setattr(corpus_audit_inputs, "fingerprint", fingerprint)
+    code, report = corpus.audit(tmp_path / "audit")
+    assert code == 0 and report["quality_checks"]["snapshot_consistency"] == "PASS"

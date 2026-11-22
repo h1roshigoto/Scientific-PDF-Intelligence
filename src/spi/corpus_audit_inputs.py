@@ -43,9 +43,17 @@ def fingerprint(path):
         return InputFile(path, digest.hexdigest(), file.tell())
 
 
-def tree(folder):
-    return {p.relative_to(folder).as_posix(): fingerprint(p)
-            for p in sorted(folder.rglob("*")) if p.is_file()}
+def is_coordination_file(name):
+    return any(name == lock or name.startswith(lock + "-") for lock in LOCKS)
+
+
+def tree(folder, *, include_coordination=True):
+    inventory = {}
+    for path in sorted(folder.rglob("*")):
+        name = path.relative_to(folder).as_posix()
+        if (include_coordination or not is_coordination_file(name)) and path.is_file():
+            inventory[name] = fingerprint(path)
+    return inventory
 
 
 def review_inputs(args):
@@ -78,6 +86,9 @@ def protection_inventory(root):
 def quiescent_store(state, existing):
     # Reserve the existing SQLite coordination locks. No SQL writes or lock-file
     # creation. BEGIN IMMEDIATE conflicts with both kinds of Store writers.
+    for name in LOCKS:
+        if any(path.startswith(name + "-") for path in existing):
+            raise AuditBlocked(f"Store coordination sidecar exists for {name}; retry after Store writes finish")
     with ExitStack() as stack:
         for name in LOCKS:
             if name not in existing:
@@ -105,12 +116,22 @@ def capture(args, snapshot):
     if previous.exists() and "documents.json" not in previous_sources:
         raise ValueError("Existing release-state has no document registry")
     review_sources = review_inputs(args)
+    groups = {"store": store_sources, "previous_release_state": previous_sources, "review": review_sources}
+
+    def same_scientific_files():
+        # Opening and closing the reserved SQLite files independently can release
+        # SQLite's POSIX advisory locks. Only hash them outside the reservation.
+        return all(
+            tree(folder, include_coordination=False)
+            == {name: item for name, item in sources.items() if not is_coordination_file(name)}
+            for folder, sources in ((args.state, store_sources), (previous, previous_sources))
+        )
+
     previous_lock = (quiescent_store(previous, previous_sources)
                      if previous.resolve() != args.state else nullcontext())
     with quiescent_store(args.state, store_sources), previous_lock:
-        if tree(args.state) != store_sources or tree(previous) != previous_sources:
+        if not same_scientific_files():
             raise AuditBlocked("Store changed before snapshot; retry after writes finish")
-        groups = {"store": store_sources, "previous_release_state": previous_sources, "review": review_sources}
         for group, sources in groups.items():
             (snapshot / group).mkdir()
             for name, source in sources.items():
@@ -121,9 +142,10 @@ def capture(args, snapshot):
                 shutil.copyfile(source.path, copy)
                 if fingerprint(copy).sha256 != source.sha256:
                     raise AuditBlocked(f"{group} changed while being copied; retry after writes finish")
-        if (tree(args.state) != store_sources or tree(previous) != previous_sources
-                or review_inputs(args) != review_sources):
+        if not same_scientific_files() or review_inputs(args) != review_sources:
             raise AuditBlocked("Store or review inputs changed during snapshot; retry after writes finish")
+    if tree(args.state) != store_sources or tree(previous) != previous_sources:
+        raise AuditBlocked("Store changed at snapshot boundary; retry after writes finish")
     return groups
 
 
