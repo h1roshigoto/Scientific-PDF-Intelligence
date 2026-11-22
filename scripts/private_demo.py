@@ -76,14 +76,16 @@ def main() -> int:
             access = DemoAccess()
         except (ImportError, ValueError) as exc:
             parser.error(f"Configure Cloudflare Access and install the demo-access extra ({type(exc).__name__}).")
-    if args.gigachat:
+    use_model = args.gigachat
+    if use_model:
         bundle = os.getenv("GIGACHAT_CA_BUNDLE_FILE")
-        if not os.getenv("GIGACHAT_CREDENTIALS", "").strip() or not bundle:
-            parser.error("--gigachat requires GIGACHAT_CREDENTIALS and GIGACHAT_CA_BUNDLE_FILE in the server environment.")
         try:
+            if not os.getenv("GIGACHAT_CREDENTIALS", "").strip() or not bundle:
+                raise ValueError
             ssl.create_default_context(cafile=bundle)
-        except OSError:
-            parser.error("GIGACHAT_CA_BUNDLE_FILE must point to a readable CA bundle.")
+        except (OSError, ValueError):
+            print("GigaChat credentials or trusted CA bundle unavailable. Starting local analysis.", file=sys.stderr)
+            use_model = False
     token = secrets.token_urlsafe(32) if args.cloudflare_access else os.getenv("SPI_UPLOAD_TOKEN") or getpass.getpass("Private demo token (at least 32 URL-safe characters): ")
     if len(token) < 32 or not re.fullmatch(r"[A-Za-z0-9._~+/-]+={0,2}", token):
         parser.error("Provide a token with at least 32 URL-safe characters.")
@@ -94,7 +96,7 @@ def main() -> int:
                        SPI_STATE_DIR=str(data / "registry"), SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN=token,
                        SPI_UPLOAD_DIR=str(data / "pdfs"), SPI_UPLOAD_STATE_DIR=str(data / "metadata"),
                        SPI_UPLOAD_PROCESS_STATE_DIR=str(data / "processing"), SPI_UPLOAD_MAX_BYTES="26214400",
-                       SPI_UPLOAD_MAX_FILES="100", SPI_UPLOAD_PROCESS_GIGACHAT=str(args.gigachat).lower(),
+                       SPI_UPLOAD_MAX_FILES="100", SPI_UPLOAD_PROCESS_GIGACHAT=str(use_model).lower(),
                        SPI_DEMO_ACCESS=str(args.cloudflare_access).lower(), SPI_DEMO_MODEL_FALLBACK="true",
                        SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS="8")
     frontend_env = dict(os.environ, SPI_BACKEND_URL=backend)
