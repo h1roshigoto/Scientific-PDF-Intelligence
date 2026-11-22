@@ -2,7 +2,7 @@
 
 The API serves the internal format. The [data passport](../passport.md) documents the separate CLI and Python CSV export.
 
-Endpoints:
+The following official Store endpoints are available in private mode:
 - GET /health
 - GET /documents?domain=solar|rag
 - GET /results?domain=solar|rag
@@ -26,10 +26,63 @@ available in the document registry and local state. Restoring scope for the
 same SHA-256 restores the saved results. The internal `/export/{artifact}`
 endpoint reads stored JSON files directly. It is a historical artifact reader.
 
+## Authentication modes
+
+`SPI_AUTH_MODE=private` defaults to the existing closed demo. `SPI_AUTH_MODE=multiuser`
+requires explicit paths, an allowed Origin list and a server secret. Invalid
+multiuser configuration prevents the API and worker from starting. In multiuser
+mode `/health` returns only `{"status":"ok"}`. Official Store routes and interactive API
+docs are disabled. Browser requests use the same origin and the `/api` prefix.
+
+| Route | Success | Request or response |
+| --- | --- | --- |
+| `GET /auth/config` | 200 | `{"mode":"private"}` or `{"mode":"multiuser"}` |
+| `GET /auth/csrf` | 200 | Issues a short-lived anonymous cookie as needed and returns `csrf_token` bound to that cookie or the current session cookie |
+| `POST /auth/register` | 201 | `email`, `password`, `display_name`, `invitation_code`. Returns the user profile |
+| `POST /auth/login` | 200 | `email` and `password`. Rotates the presented session and sets the new HttpOnly cookie |
+| `GET /auth/me` | 200 | Profile and public `session_id` for binding the current browser view |
+| `POST /auth/logout` | 204 | Revokes the session and expires its cookie |
+| `GET /auth/sessions` | 200 | Current account's active sessions with time fields and a `current` flag |
+| `DELETE /auth/sessions/{session_id}` | 204 | Revokes an account-owned session and clears the cookie if current |
+| `POST /auth/change-password` | 204 | `current_password` and `new_password`. Revokes all sessions for the account |
+| `GET /account/usage` | 200 | `documents`, `storage_bytes`, `limits`, `active_jobs`, `queued_jobs`, remaining model requests and exports, and `period_seconds` |
+
+Send cookies on multiuser requests. Send the exact allowed browser `Origin`
+and the `X-SPI-CSRF` header on POST and DELETE. Obtain a new CSRF value after
+login or logout. For browsers with several tabs, pass the public identifier
+from `/auth/me` in `X-SPI-Session-ID` on protected calls to reject a stale view
+if another tab has rotated the cookie. It cannot authenticate a request.
+User and session timestamp fields are Unix seconds. Email verification is false
+until a verification workflow exists.
+
+All multiuser responses use `Cache-Control: no-store`. Auth errors contain a
+machine-readable `detail` code. An invalid or expired invitation returns 400.
+Missing sessions and invalid credentials return 401. Invalid Origin or CSRF
+returns 403. Invalid fields return 422. Conflicts return 409. Rate or export
+limits return 429 with `Retry-After` in seconds. Unavailable auth storage returns
+503. A valid ID for someone else's upload, job or session uses the same 404
+as an absent resource. Size violations return 413.
+
+Tenant resolution happens before reading files, results, issues, review
+history or export snapshots. A user cannot choose the tenant via the request.
+The same rules apply to admins. Review decisions retain the existing scientific
+and export contract. The audit envelope stores the account actor separately,
+and historical review labels retain their original meaning.
+
+PDF storage quota counts original PDF bytes. Upload count and byte limits,
+queue size and retries are enforced with per-tenant SQLite transactions.
+Live worker concurrency uses cross-process SQLite locks. Model completions and
+export attempts for owned uploads use a UTC day budget. An attempted completion
+or export can consume budget after downstream failure. Export previews are
+rate limited. Processing rows with status `processing` may represent interrupted
+work pending recovery. Scientific output and ZIP schema remain version 1.
+
 ## Private PDF uploads
 
-All upload routes require `Authorization: Bearer <token>`. The browser uses
-the same-origin Vite proxy, so it calls `/api/uploads`. Set
+In private mode all upload routes require `Authorization: Bearer <token>`. In
+multiuser mode they require a current cookie session and resolve the Store
+from its owner. The browser uses the same-origin proxy and calls
+`/api/uploads`. For legacy uploads set
 `SPI_UPLOAD_ENABLED=true` and a server-only `SPI_UPLOAD_TOKEN` of at least
 32 characters. Generate it with `secrets.token_urlsafe(32)`.
 
@@ -49,7 +102,8 @@ Submit `multipart/form-data` with exactly one `file` and one `domain`
 the file part's MIME type or extension. The API limits the PDF part and total
 multipart body as bytes arrive, without using `Content-Length` for validation.
 The default file limit is 25 MiB (`SPI_UPLOAD_MAX_BYTES`). The default
-store-wide quota is 100 files (`SPI_UPLOAD_MAX_FILES`). Repeated names are
+legacy store-wide quota is 100 files (`SPI_UPLOAD_MAX_FILES`). Multiuser defaults and
+per-account overrides are reported by `GET /account/usage`. Repeated names are
 allowed. Each accepted request gets its own opaque ID.
 
 Metadata fields are `upload_id` (32 hexadecimal characters), `domain`,

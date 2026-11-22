@@ -53,7 +53,10 @@ function client(fetcher: typeof fetch, timeoutMs: number, statusMessages: Readon
           ? detailMessages[detail] : undefined) ?? statusMessages[response.status] ?? (response.status === 404
           ? 'Запрошенный файл или запись недоступны.'
           : `Сервер вернул ошибку HTTP ${response.status}.`);
-        throw new DataError(message, response.status);
+        const wait = Number(response.headers.get('Retry-After'));
+        throw new DataError(response.status === 429
+          ? `${message}${Number.isSafeInteger(wait) && wait > 0 ? ` Повторите через ${wait} с.` : ''}`
+          : message, response.status);
       }
       return await read(response);
     } catch (error) {
@@ -217,16 +220,21 @@ const uploadDetails = {
   upload_export_storage_error: 'Сервер не смог подготовить экспорт. Повторите попытку.',
 };
 
-export function createUploadClient(fetcher = fetch) {
+export type UploadAuth = { mode: 'private' } | { mode: 'multiuser'; sessionId: string; onUnauthorized: () => void };
+
+export function createUploadClient(fetcher = fetch, auth: UploadAuth = { mode: 'private' }) {
   const endpoint = '/api/uploads';
-  const http = client(fetcher, 120_000, {
-    401: 'Неверный токен доступа.',
+  const http = client(auth.mode === 'multiuser'
+    ? sessionFetcher(fetcher, auth.sessionId, auth.onUnauthorized)
+    : fetcher, 120_000, {
+    ...accountStatuses,
+    401: auth.mode === 'private' ? 'Неверный токен доступа.' : 'Войдите, чтобы продолжить.',
     503: 'Приватная загрузка сейчас недоступна.',
-  }, uploadDetails);
-  const privateRequest = (token: string): RequestInit => ({
-    cache: 'no-store', credentials: 'omit', redirect: 'error',
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  }, { ...accountDetails, ...uploadDetails });
+  const privateRequest = (token: string): RequestInit => auth.mode === 'private'
+    ? { cache: 'no-store', credentials: 'omit', redirect: 'error',
+      headers: token ? { Authorization: `Bearer ${token}` } : {} }
+    : sessionInit;
   const uploadEndpoint = (id: string, action: string) => `${endpoint}/${encodeURIComponent(id)}/${action}`;
   const reviewEndpoint = (id: string, result: string) => uploadEndpoint(id, `results/${encodeURIComponent(result)}/review`);
 
@@ -243,7 +251,7 @@ export function createUploadClient(fetcher = fetch) {
         }, privateRequest(token));
       } catch (error) {
         if (error instanceof DataError) {
-          if (error.status === 401) return { kind: 'locked' as const, rejected: Boolean(token) };
+          if (auth.mode === 'private' && error.status === 401) return { kind: 'locked' as const, rejected: Boolean(token) };
           if (error.status === 503 || error.status === 404) {
             return { kind: 'unavailable' as const, message: error.status === 404
               ? 'Сервер не поддерживает загрузку PDF.' : error.message };
@@ -328,6 +336,79 @@ export function createUploadClient(fetcher = fetch) {
 }
 
 export type UploadClient = ReturnType<typeof createUploadClient>;
+
+const sessionInit = { cache: 'no-store', credentials: 'same-origin', redirect: 'error' } as const;
+const accountStatuses = {
+  403: 'Доступ запрещён.',
+  422: 'Проверьте введённые данные.',
+  429: 'Достигнут лимит запросов.',
+  503: 'Сервис аккаунтов временно недоступен.',
+};
+const accountDetails = {
+  invalid_credentials: 'Неверный email или пароль.',
+  session_required: 'Войдите, чтобы продолжить.',
+  invalid_invitation: 'Приглашение недействительно, уже использовано или просрочено.',
+  weak_password: 'Выберите менее предсказуемый пароль длиной от 15 до 128 символов.',
+  account_conflict: 'Не удалось создать аккаунт с этим email.',
+  processing_quota_full: 'Достигнут лимит заданий или повторных запусков.',
+  export_quota_full: 'Достигнут суточный лимит экспортов.',
+};
+const csrfSchema = z.object({ csrf_token: z.string().regex(/^[a-f0-9]{64}$/) });
+const userSchema = z.object({
+  user_id: uploadId, email: z.string(), display_name: z.string(), role: z.enum(['user', 'admin']),
+  email_verified: z.boolean(),
+});
+const sessionSchema = userSchema.extend({ session_id: uploadId });
+const sessionListSchema = z.array(z.object({
+  session_id: uploadId, created_at: z.number(), last_seen_at: z.number(), expires_at: z.number(), current: z.boolean(),
+}));
+const usageSchema = z.object({
+  documents: z.number(), storage_bytes: z.number(), active_jobs: z.number(), queued_jobs: z.number(),
+  model_requests_remaining: z.number(), exports_remaining: z.number(),
+  limits: z.object({
+    max_upload_files: z.number(), max_total_storage_bytes: z.number(), max_pdf_bytes: z.number(),
+    max_active_jobs: z.number(), max_queued_jobs: z.number(), max_model_requests: z.number(),
+    max_exports_per_period: z.number(), max_retries: z.number(),
+  }),
+});
+export type AccountSession = z.infer<typeof sessionSchema>;
+
+function sessionFetcher(fetcher: typeof fetch, sessionId?: string, onUnauthorized?: () => void): typeof fetch {
+  const http = client(fetcher, 15_000, accountStatuses, accountDetails);
+  return async (url, init) => {
+    const headers = new Headers(init?.headers);
+    if (sessionId) headers.set('X-SPI-Session-ID', sessionId);
+    if (init?.method && init.method !== 'GET') {
+      const signal = init.signal ?? new AbortController().signal;
+      const { csrf_token } = await http.json('/api/auth/csrf', csrfSchema, signal, sessionInit);
+      signal.throwIfAborted();
+      headers.set('X-SPI-CSRF', csrf_token);
+    }
+    const response = await fetcher(url, { ...init, ...sessionInit, headers });
+    if (response.status === 401 && !init?.signal?.aborted) onUnauthorized?.();
+    return response;
+  };
+}
+
+export function createAccountClient(sessionId?: string, onUnauthorized?: () => void) {
+  const http = client(sessionFetcher(fetch, sessionId, onUnauthorized), 15_000, accountStatuses, accountDetails);
+  const jsonPost = (body: object): RequestInit => ({
+    method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' },
+  });
+  return {
+    config: (signal: AbortSignal) => http.json('/api/auth/config', z.object({ mode: z.enum(['private', 'multiuser']) }), signal),
+    me: (signal: AbortSignal) => http.json('/api/auth/me', sessionSchema, signal),
+    login: (email: string, password: string, signal: AbortSignal) =>
+      http.json('/api/auth/login', sessionSchema, signal, jsonPost({ email, password })),
+    register: (email: string, password: string, display_name: string, invitation_code: string, signal: AbortSignal) =>
+      http.json('/api/auth/register', userSchema, signal, jsonPost({ email, password, display_name, invitation_code })),
+    logout: (signal: AbortSignal) => http.request('/api/auth/logout', signal, async () => {}, { method: 'POST' }),
+    sessions: (signal: AbortSignal) => http.json('/api/auth/sessions', sessionListSchema, signal),
+    revoke: (id: string, signal: AbortSignal) =>
+      http.request(`/api/auth/sessions/${encodeURIComponent(id)}`, signal, async () => {}, { method: 'DELETE' }),
+    usage: (signal: AbortSignal) => http.json('/api/account/usage', usageSchema, signal),
+  };
+}
 
 function scoped<T extends { domain: Domain }>(schema: z.ZodType<T>, domain?: Domain) {
   return z.array(domain ? schema.refine((row) => row.domain === domain) : schema);

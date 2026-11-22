@@ -10,24 +10,30 @@ from secrets import token_hex
 from pydantic import BaseModel, Field
 
 from .models import UPLOAD_ID_PATTERN, Domain, StoredUpload, UploadProcessing
-from .upload_store import private_path, private_sqlite_path
+from .upload_store import UploadQuotaFull, private_path, private_sqlite_path
 
 
 class UploadJob(BaseModel):
     domain: Domain
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    owner_user_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     processing: UploadProcessing
     model_requests: int = Field(default=0, ge=0)
+    model_request_budget: int | None = Field(default=None, ge=1, le=32)
+    retries: int = Field(default=0, ge=0)
 
     def matches(self, upload: StoredUpload) -> bool:
-        return (self.processing.upload_id, self.domain, self.sha256) == (
-            upload.upload_id, upload.domain, upload.sha256,
+        return (self.processing.upload_id, self.domain, self.sha256, self.owner_user_id) == (
+            upload.upload_id, upload.domain, upload.sha256, upload.owner_user_id,
         )
 
 
 class UploadQueue:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, owner_user_id=None, *, quota=None, job_budget=None):
         self.root = root
+        self.owner_user_id = owner_user_id
+        self.quota = quota
+        self.job_budget = job_budget
 
     @contextmanager
     def _connect(self):
@@ -40,13 +46,13 @@ class UploadQueue:
             )""")
             yield db
 
-    @staticmethod
-    def _get(db, upload_id: str) -> UploadJob | None:
+    def _get(self, db, upload_id: str) -> UploadJob | None:
         row = db.execute("SELECT metadata FROM jobs WHERE upload_id = ?", (upload_id,)).fetchone()
         if not row:
             return None
         job = UploadJob.model_validate_json(row[0])
-        if job.processing.upload_id != upload_id or job.processing.job_id is None:
+        if (job.processing.upload_id != upload_id or job.processing.job_id is None
+                or job.owner_user_id != self.owner_user_id):
             raise ValueError("Invalid upload job identity")
         return job
 
@@ -71,17 +77,31 @@ class UploadQueue:
             yield self._get(db, upload_id)
 
     def enqueue(self, upload: StoredUpload) -> UploadJob:
+        if upload.owner_user_id != self.owner_user_id:
+            raise ValueError("Upload owner does not match the queue")
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, upload.upload_id)
             if current and not current.processing.retry_allowed:
                 return current
-            job = UploadJob(domain=upload.domain, sha256=upload.sha256, processing=UploadProcessing(
+            if current and not current.matches(upload):
+                raise ValueError("Upload identity does not match its existing job")
+            retries = current.retries + 1 if current else 0
+            if self.quota and (retries > self.quota.max_retries or
+                    db.execute("SELECT count(*) FROM jobs WHERE status = 'queued'").fetchone()[0]
+                    >= self.quota.max_queued_jobs):
+                raise UploadQuotaFull
+            job = UploadJob(domain=upload.domain, sha256=upload.sha256, owner_user_id=self.owner_user_id,
+                            model_request_budget=self.job_budget, retries=retries, processing=UploadProcessing(
                 upload_id=upload.upload_id, job_id=token_hex(16), status="queued", step="queued",
                 updated_at=datetime.now(timezone.utc),
             ))
             self._save(db, job)
             return job
+
+    def counts(self):
+        with self._connect() as db:
+            return dict(db.execute("SELECT status, count(*) FROM jobs GROUP BY status"))
 
     @contextmanager
     def _worker_lock(self, upload_id: str):
@@ -134,10 +154,12 @@ class UploadQueue:
             db.execute("BEGIN IMMEDIATE")
             current = self._get(db, job.processing.upload_id)
             if (current is None or current.processing.job_id != job.processing.job_id
-                    or current.processing.status != "processing"):
+                    or current.processing.status != "processing" or job.owner_user_id != self.owner_user_id):
                 raise RuntimeError("Upload job is no longer owned by this worker")
             if reserve_model_request:
-                job.model_requests += 1
+                if current.model_request_budget is not None and current.model_requests >= current.model_request_budget:
+                    raise UploadQuotaFull
+                job.model_requests = current.model_requests + 1
             job.processing = UploadProcessing.model_validate({
                 **job.processing.model_dump(), **changes, "updated_at": datetime.now(timezone.utc),
             })

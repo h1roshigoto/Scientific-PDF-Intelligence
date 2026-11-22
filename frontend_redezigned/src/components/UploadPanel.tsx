@@ -4,13 +4,13 @@ import { errorMessage } from '../data';
 import type { StoredUpload, UploadClient } from '../data';
 import type { Domain } from '../domain';
 import { useData } from '../hooks/useData';
-import { uploadClient } from '../provider';
+import { useUploadClient } from '../provider';
 import { Badge } from './Badge';
 import { Feedback, LoadBoundary } from './Feedback';
 import { PdfPane } from './PdfPane';
 import { UploadProcessingControls } from './UploadProcessing';
 
-export type UploadCredentials = { token: string; setToken: (token: string) => void };
+export type UploadCredentials = { token: string; setToken?: (token: string) => void };
 const date = new Intl.DateTimeFormat('ru', { dateStyle: 'medium', timeStyle: 'medium' });
 const sizeNumber = new Intl.NumberFormat('ru', { maximumFractionDigits: 2 });
 
@@ -21,7 +21,7 @@ function fileSize(bytes: number) {
 }
 
 function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
-  api: UploadClient; token: string; initial: StoredUpload[]; maxBytes: number; lock: () => void;
+  api: UploadClient; token: string; initial: StoredUpload[]; maxBytes: number; lock?: () => void;
 }) {
   const [records, setRecords] = useState(initial);
   const [listRevision, setListRevision] = useState(0);
@@ -76,7 +76,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
       if (access.kind === 'authorized') {
         setRecords(access.records);
         setListRevision((value) => value + 1);
-      } else lock();
+      } else lock?.();
     });
   }
 
@@ -114,7 +114,7 @@ function AuthorizedUploads({ api, token, initial, maxBytes, lock }: {
         <button className="button" type="button" onClick={refresh} disabled={Boolean(busy)}>
           {busy === 'refresh' ? 'Обновляем список…' : 'Обновить список'}
         </button>
-        <button className="button quiet" type="button" onClick={lock} disabled={Boolean(busy)}>Выйти</button>
+        {lock && <button className="button quiet" type="button" onClick={lock} disabled={Boolean(busy)}>Выйти</button>}
       </div>
       {records.length === 0 ? <p className="muted">Сохранённых PDF пока нет.</p> : (
         <ul className="upload-list" aria-label="Сохранённые PDF">
@@ -160,6 +160,7 @@ export function PrivateUploadAccess({ api, token, setToken, children }: UploadCr
         if (result.kind === 'authorized') {
           return children(result.records, result.maxBytes);
         }
+        if (!setToken) return <Feedback kind="error" title="Войдите, чтобы продолжить" />;
         return (
           <>
             {result.rejected && <p role="alert">Неверный токен доступа.</p>}
@@ -183,15 +184,15 @@ export function PrivateUploadAccess({ api, token, setToken, children }: UploadCr
   );
 }
 
-export function UploadPanel(credentials: UploadCredentials) {
-  const api = uploadClient;
+export function UploadPanel({ token, setToken }: UploadCredentials) {
+  const api = useUploadClient();
   return (
     <section className="surface upload-panel" aria-labelledby="uploads-heading">
       <header className="section-bar"><h2 id="uploads-heading">Мои загрузки</h2></header>
       <div className="upload-content">
-        {api ? <PrivateUploadAccess api={api} {...credentials}>
-          {(records, maxBytes) => <AuthorizedUploads api={api} token={credentials.token}
-            initial={records} maxBytes={maxBytes} lock={() => credentials.setToken('')} />}
+        {api ? <PrivateUploadAccess api={api} token={token} setToken={setToken}>
+          {(records, maxBytes) => <AuthorizedUploads api={api} token={token}
+            initial={records} maxBytes={maxBytes} lock={setToken ? () => setToken('') : undefined} />}
         </PrivateUploadAccess> : (
           <Feedback kind="empty" title="Загрузка PDF отключена в демонстрационном режиме" />
         )}

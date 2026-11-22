@@ -1,4 +1,6 @@
+import { createContext, useContext } from 'react';
 import { createApiProvider, createUploadClient } from './data';
+import type { UploadClient } from './data';
 import { createMockProvider } from './mock';
 
 const passportPath = import.meta.env.VITE_PROJECT_PASSPORT_PATH?.trim() || 'export/project-passport.pdf';
@@ -12,3 +14,5 @@ export const provider = import.meta.env.DEV && import.meta.env.VITE_DATA_SOURCE 
   : createApiProvider({ base: import.meta.env.VITE_API_BASE || '/api', csvBase: import.meta.env.VITE_CSV_ARTIFACT_BASE, passport });
 
 export const uploadClient = provider.mode === 'api' ? createUploadClient() : undefined;
+export const UploadClientContext = createContext<UploadClient | undefined>(undefined);
+export const useUploadClient = () => useContext(UploadClientContext) ?? uploadClient;

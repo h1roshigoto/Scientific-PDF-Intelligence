@@ -3,7 +3,7 @@
 import logging
 import os
 import sqlite3
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from secrets import compare_digest
 from tempfile import TemporaryFile
 from typing import Annotated
@@ -21,6 +21,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.requests import ClientDisconnect
 
+from .auth_api import current_session, rate
+from .auth_store import AuthError
 from .models import UPLOAD_ID_PATTERN, ResultRecord, StoredUpload, UploadJobAccepted, UploadProcessing, ValidationIssue
 from .review_models import ReviewDetail, ReviewedResult, ReviewEvent, ReviewOverview, ReviewRequest
 from .upload_export import archive_filename, build_archive, build_artifact, capture_snapshot
@@ -28,7 +30,8 @@ from .upload_export_models import ManifestPreview
 from .upload_processing import UploadProcessingStore
 from .upload_queue import UploadQueue
 from .upload_reviews import ReviewError, UploadReviews
-from .upload_store import InvalidPdf, UploadQuotaFull, UploadStore, UploadTooLarge, upload_token
+from .tenant_storage import DAY, tenant_lease, tenant_queue, tenant_store
+from .upload_store import InvalidPdf, UploadQuotaFull, UploadStore, UploadTooLarge, storage_lease, upload_token
 
 router = APIRouter(prefix="/uploads", tags=["private uploads"], responses={
     401: {"description": "Missing or invalid bearer token"},
@@ -49,8 +52,27 @@ def _error(status: int, detail: str) -> HTTPException:
 
 
 def _authorized_store(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
-) -> UploadStore:
+):
+    db = getattr(request.app.state, "auth", None)
+    if db:
+        if request.headers.get("authorization") is not None:
+            raise AuthError(401, "session_required")
+        owner = current_session(request, db).user.user_id
+        path = request.url.path.rstrip("/")
+        if "/export/" in path:
+            category = "export"
+        elif request.method == "POST":
+            category = "upload" if path == "/uploads" else "process" if path.endswith("/process") else "review"
+        else:
+            category = "upload_read"
+        rate(db, request, category, owner)
+        quota = db.quotas(owner)
+        request.state.upload_quota = quota
+        with tenant_lease(db.config, owner):
+            yield tenant_store(db.config, owner, quota)
+        return
     if os.getenv("SPI_UPLOAD_ENABLED", "").strip().lower() not in {"1", "true"}:
         raise _error(503, "uploads_disabled")
     try:
@@ -60,10 +82,12 @@ def _authorized_store(
     if credentials is None or not compare_digest(credentials.credentials.encode(), token.encode()):
         raise _error(401, "upload_unauthorized")
     try:
-        return UploadStore.from_env()
+        uploads = UploadStore.from_env()
     except (OSError, RuntimeError, ValueError) as exc:
         logger.warning("Invalid private upload configuration")
         raise _error(503, "uploads_misconfigured") from exc
+    with storage_lease(uploads.state) if uploads.state.exists() else nullcontext():
+        yield uploads
 
 
 PrivateStore = Annotated[UploadStore, Depends(_authorized_store)]
@@ -206,17 +230,21 @@ def upload_file(upload_id: UploadId, uploads: PrivateStore) -> FileResponse:
                         headers={**NO_STORE, "X-Content-Type-Options": "nosniff"})
 
 
-def _queue(uploads: UploadStore) -> UploadQueue:
+def _queue(uploads: UploadStore, request: Request | None = None) -> UploadQueue:
     if uploads.processing is None:
         raise _error(503, "upload_processing_unconfigured")
-    return UploadQueue(uploads.processing)
+    if uploads.owner_user_id is not None and request is not None:
+        return tenant_queue(request.app.state.auth.config, uploads, request.state.upload_quota)
+    return UploadQueue(uploads.processing, uploads.owner_user_id)
 
 
 @router.post("/{upload_id}/process", status_code=202, response_model=UploadJobAccepted)
-def process_upload(upload_id: UploadId, response: Response, uploads: PrivateStore) -> UploadJobAccepted:
+def process_upload(upload_id: UploadId, request: Request, response: Response, uploads: PrivateStore) -> UploadJobAccepted:
     upload = _get_upload(upload_id, uploads)
     try:
-        state = _queue(uploads).enqueue(upload).processing
+        state = _queue(uploads, request).enqueue(upload).processing
+    except UploadQuotaFull as exc:
+        raise _error(409, "processing_quota_full") from exc
     except STORAGE_ERRORS as exc:
         raise _error(500, "upload_processing_storage_error") from exc
     response.headers.update(NO_STORE)
@@ -358,8 +386,12 @@ def _export_operation():
         raise _error(500, "upload_export_storage_error") from exc
 
 
-def _snapshot(upload_id, uploads, expected=None):
+def _snapshot(upload_id, uploads, expected=None, *, request=None):
     upload = _get_upload(upload_id, uploads)
+    if request is not None and upload.owner_user_id is not None:
+        db = request.app.state.auth
+        db.consume([("quota_export", upload.owner_user_id, request.state.upload_quota.max_exports_per_period, DAY)],
+                   code="export_quota_full")
     queue = _queue(uploads)
     return capture_snapshot(uploads, upload, queue, expected=expected)
 
@@ -380,29 +412,29 @@ def export_preview(upload_id: UploadId, response: Response, uploads: PrivateStor
         return snapshot.preview
 
 
-def _download(upload_id, uploads, expected, name):
+def _download(upload_id, uploads, expected, name, request):
     with _export_operation():
-        snapshot = _snapshot(upload_id, uploads, expected)
+        snapshot = _snapshot(upload_id, uploads, expected, request=request)
         artifact = build_artifact(snapshot, name)
         return Response(artifact.content, media_type=artifact.media_type,
                         headers=_attachment(snapshot, artifact.filename))
 
 
 @export_router.get("/reviewed-results.csv", response_class=Response, responses={200: {"content": {"text/csv": {}}}})
-def export_csv(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
-    return _download(upload_id, uploads, snapshot, "reviewed_results.csv")
+def export_csv(upload_id: UploadId, uploads: PrivateStore, request: Request, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "reviewed_results.csv", request)
 
 
 @export_router.get("/reviewed-results.json", response_class=Response,
                    responses={200: {"content": {"application/json": {}}}})
-def export_json(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
-    return _download(upload_id, uploads, snapshot, "reviewed_results.json")
+def export_json(upload_id: UploadId, uploads: PrivateStore, request: Request, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "reviewed_results.json", request)
 
 
 @export_router.get("/scientific-passport.pdf", response_class=Response,
                    responses={200: {"content": {"application/pdf": {}}}})
-def export_private_passport(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
-    return _download(upload_id, uploads, snapshot, "scientific-passport.pdf")
+def export_private_passport(upload_id: UploadId, uploads: PrivateStore, request: Request, snapshot: SnapshotHeader = None):
+    return _download(upload_id, uploads, snapshot, "scientific-passport.pdf", request)
 
 
 class _ProjectResponse(StreamingResponse):
@@ -425,9 +457,9 @@ class _ProjectResponse(StreamingResponse):
 
 @export_router.get("/project.zip", response_class=StreamingResponse,
                    responses={200: {"content": {"application/zip": {}}}})
-def export_project(upload_id: UploadId, uploads: PrivateStore, snapshot: SnapshotHeader = None):
+def export_project(upload_id: UploadId, uploads: PrivateStore, request: Request, snapshot: SnapshotHeader = None):
     with _export_operation():
-        return _ProjectResponse(_snapshot(upload_id, uploads, snapshot))
+        return _ProjectResponse(_snapshot(upload_id, uploads, snapshot, request=request))
 
 
 router.include_router(export_router)

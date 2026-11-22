@@ -10,6 +10,9 @@ export default defineConfig(({ mode }) => {
   const proxy = {
     '/api': {
       target: env.SPI_BACKEND_URL || 'http://127.0.0.1:8000',
+      // FastAPI validates the original browser Host and Origin itself.
+      changeOrigin: false,
+      xfwd: false,
       rewrite: (path: string) => path.replace(/^\/api(?=\/|$)/, ''),
     },
   };

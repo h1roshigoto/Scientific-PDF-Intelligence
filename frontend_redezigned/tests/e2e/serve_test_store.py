@@ -80,6 +80,7 @@ if __name__ == "__main__":
         root = Path(folder)
         store = seed(root)
         os.environ.update(
+            SPI_AUTH_MODE="private",
             SPI_STATE_DIR=str(store.root), SPI_RUN_ID="playwright-e2e",
             SPI_UPLOAD_ENABLED="true", SPI_UPLOAD_TOKEN="synthetic-playwright-token-0123456789",
             SPI_UPLOAD_DIR=str(root / "uploads"), SPI_UPLOAD_STATE_DIR=str(root / "upload-state"),

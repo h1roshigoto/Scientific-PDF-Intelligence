@@ -5,17 +5,22 @@ import logging
 import os
 import re
 import sqlite3
+from collections import deque
 from contextlib import ExitStack
 from hashlib import sha256
+from pathlib import Path
 from time import sleep
 
+from .auth_config import AuthConfig, auth_mode
+from .auth_store import AuthError, AuthStore
 from .batch import run_batch
 from .config import load_project_env
-from .gigachat import GigaChatClient, GigaChatSettings
+from .gigachat import GigaChatClient, GigaChatError, GigaChatSettings
 from .models import ProcessingCounts, ProcessingPage
+from .tenant_storage import DAY, tenant_lease, tenant_queue, tenant_root, tenant_store, worker_slot
 from .upload_processing import UploadProcessingStore
 from .upload_queue import UploadQueue
-from .upload_store import UploadStore, upload_token
+from .upload_store import UploadStore, private_path, private_sqlite_path, storage_lease, upload_token
 
 logger = logging.getLogger(__name__)
 
@@ -80,15 +85,17 @@ def _finish(queue, job, store):
 
 
 class UploadWorker:
-    def __init__(self, uploads: UploadStore, *, model_enabled=False, max_requests=8):
+    def __init__(self, uploads: UploadStore, *, model_enabled=False, max_requests=8, auth=None, quota=None):
         if uploads.processing is None:
             raise ValueError("SPI_UPLOAD_PROCESS_STATE_DIR is required")
         if not 1 <= max_requests <= 32:
             raise ValueError("SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS must be between 1 and 32")
         self.uploads = uploads
-        self.queue = UploadQueue(uploads.processing)
+        self.queue = tenant_queue(auth.config, uploads, quota) if auth else UploadQueue(uploads.processing)
         self.model_enabled = model_enabled
         self.max_requests = max_requests
+        self.auth = auth
+        self.quota = quota
 
     def run_one(self) -> bool:
         with self.queue.claim() as job:
@@ -114,11 +121,19 @@ class UploadWorker:
             diagnostic = "model_credentials_missing_local"
         self.queue.update(job, step="extracting", mode=mode, diagnostic=diagnostic)
         store = UploadProcessingStore(self.queue.root, upload, create=True)
+        budget = min(self.max_requests, job.model_request_budget or self.max_requests)
+        remaining = max(0, budget - job.model_requests)
         with ExitStack() as resources:
             client = None
 
             def complete(prompt, *, schema):
                 nonlocal client
+                if self.auth:
+                    try:
+                        self.auth.consume([("quota_model", upload.owner_user_id, self.quota.max_model_requests, DAY)],
+                                          code="model_request_quota_full")
+                    except AuthError as exc:
+                        raise GigaChatError("completion", exc.code) from exc
                 if client is None:
                     client = resources.enter_context(GigaChatClient(settings, max_completion_retries=0))
                 # Save the reservation before any external completion, including on
@@ -128,11 +143,50 @@ class UploadWorker:
 
             run_batch(
                 store, [path], upload.domain, local_only=mode == "local",
-                complete=complete, max_requests=max(0, self.max_requests - job.model_requests),
+                complete=complete, max_requests=remaining,
                 pdf_content=content, retry_invalid_completion=True,
             )
         self.queue.update(job, step="checking_results")
         _finish(self.queue, job, store)
+
+
+class MultiuserWorker:
+    def __init__(self, auth, *, model_enabled=False):
+        self.auth = auth
+        self.config = auth.config
+        self.model_enabled = model_enabled
+        self.last_owner = None
+
+    def run_one(self):
+        config = self.config
+        slots = private_path(config.root, Path("worker-slots"), directory=True)
+        with worker_slot(slots / "global", config.global_jobs) as acquired:
+            if not acquired:
+                return False
+            owners = deque(self.auth.active_users())
+            if self.last_owner in owners:
+                owners.rotate(-owners.index(self.last_owner) - 1)
+            for owner in owners:
+                try:
+                    if self._run_owner(owner, slots):
+                        self.last_owner = owner
+                        return True
+                except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                    logger.warning("Tenant job store unavailable (%s)", type(exc).__name__)
+        return False
+
+    def _run_owner(self, owner, slots):
+        config = self.config
+        processing = private_path(tenant_root(config, owner), Path("processing"), directory=True)
+        if not private_sqlite_path(processing, Path("queue.sqlite3")).is_file():
+            return False
+        quota = self.auth.quotas(owner)
+        with tenant_lease(config, owner), worker_slot(slots / owner, quota.max_active_jobs) as acquired:
+            user = self.auth.user(owner)
+            if not acquired or user is None or user.status != "active":
+                return False
+            return UploadWorker(tenant_store(config, owner, quota), auth=self.auth, quota=quota,
+                                model_enabled=self.model_enabled, max_requests=config.job_requests).run_one()
 
 
 def main():
@@ -142,25 +196,31 @@ def main():
     logging.basicConfig(level=logging.INFO)
     load_project_env()
     try:
-        if os.getenv("SPI_UPLOAD_ENABLED", "").strip().lower() not in {"1", "true"}:
-            parser.error("SPI_UPLOAD_ENABLED must be true")
-        upload_token()
-        worker = UploadWorker(
-            UploadStore.from_env(),
-            model_enabled=os.getenv("SPI_UPLOAD_PROCESS_GIGACHAT", "").strip().lower() in {"1", "true"},
-            max_requests=int(os.getenv("SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS", "8")),
-        )
-    except (OSError, RuntimeError, ValueError):
-        parser.error("Invalid private upload configuration. Check token, directories and model request limit (1–32).")
+        model_enabled = os.getenv("SPI_UPLOAD_PROCESS_GIGACHAT", "").strip().lower() in {"1", "true"}
+        if auth_mode() == "multiuser":
+            auth = AuthStore(AuthConfig.from_env())
+            auth.initialize()
+            worker = MultiuserWorker(auth, model_enabled=model_enabled)
+        else:
+            if os.getenv("SPI_UPLOAD_ENABLED", "").strip().lower() not in {"1", "true"}:
+                parser.error("SPI_UPLOAD_ENABLED must be true")
+            upload_token()
+            worker = UploadWorker(UploadStore.from_env(), model_enabled=model_enabled,
+                                  max_requests=int(os.getenv("SPI_UPLOAD_PROCESS_MAX_MODEL_REQUESTS", "8")))
+    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        parser.error("Invalid worker configuration. Check authentication, storage and model request limit (1–32).")
 
     logger.info("Private upload worker ready")
     try:
-        while True:
-            worked = worker.run_one()
-            if args.once:
-                return
-            if not worked:
-                sleep(1)
+        with ExitStack() as resources:
+            if isinstance(worker, UploadWorker):
+                resources.enter_context(storage_lease(worker.uploads.state))
+            while True:
+                worked = worker.run_one()
+                if args.once:
+                    return
+                if not worked:
+                    sleep(1)
     except KeyboardInterrupt:
         return
 
