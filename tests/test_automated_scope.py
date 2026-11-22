@@ -55,7 +55,8 @@ def accepted(row, track="solar"):
 
 def save_manifest(path, records):
     path.write_text(json.dumps({
-        "policy": auto.POLICY, "model": "gpt-6.2-sol", "records": records,
+        "policy": auto.POLICY, "model": "gpt-6.2-sol",
+        "rag_demo_criterion": auto.RAG_DEMO_CRITERION, "records": records,
     }), encoding="utf-8")
 
 
@@ -147,6 +148,7 @@ def test_disputed_rag_pair_is_held_together(tmp_path):
 def test_missing_native_text_abstains_without_model_call(tmp_path, monkeypatch):
     row, _ = make_pdf(tmp_path)
     pdf_path = tmp_path / row["pdf_path"]
+    pdf_path.unlink()
     with pymupdf.open() as pdf:
         pdf.new_page()  # no native text
         pdf.save(pdf_path)
