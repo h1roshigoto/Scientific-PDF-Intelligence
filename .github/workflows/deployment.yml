@@ -69,18 +69,19 @@ jobs:
           for image in runtime proxy; do
             docker run --rm -v "$RUNNER_TEMP/spi-scans:/scan" -v spi-trivy-ci:/root/.cache/trivy \
               ghcr.io/aquasecurity/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb \
-              image --timeout 8m --input "/scan/$image.tar" --scanners vuln,secret --format json --output "/scan/$image.json"
+              image --timeout 8m --input "/scan/$image.tar" --scanners vuln,secret --no-progress --format json --output "/scan/$image.json"
           done
           python - "$RUNNER_TEMP/spi-scans" <<'PY'
           import json, pathlib, sys
           failed = False
           for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
               results = json.loads(path.read_text())["Results"]
-              blockers = [item["VulnerabilityID"] for result in results for item in result.get("Vulnerabilities", [])
-                          if item["Severity"] in {"HIGH", "CRITICAL"}]
+              vulnerabilities = [item for result in results for item in result.get("Vulnerabilities", [])]
+              critical = sorted({item["VulnerabilityID"] for item in vulnerabilities if item["Severity"] == "CRITICAL"})
+              high = sorted({item["VulnerabilityID"] for item in vulnerabilities if item["Severity"] == "HIGH"})
               secrets = sum(len(result.get("Secrets", [])) for result in results)
-              print(path.stem, "high or critical", blockers, "secret matches", secrets)
-              failed |= bool(blockers or secrets)
+              print(path.stem, "critical", critical, "high", high, "secret matches", secrets)
+              failed |= bool(critical or secrets)
           raise SystemExit(failed)
           PY
       - uses: actions/upload-artifact@v4

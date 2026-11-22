@@ -13,6 +13,7 @@ CONTROLS = (
     "disk_limits", "security_scans", "production_e2e",
 )
 STATUSES = {"PASS", "FAIL", "NOT RUN", "BLOCKED"}
+BASELINE = {"security_scans": {"status": "BLOCKED", "reference": "docs/P0_31_RESULTS.md"}}
 
 
 def evaluate(evidence=None):
@@ -31,7 +32,7 @@ def evaluate(evidence=None):
     if set(supplied) - set(CONTROLS):
         raise ValueError("Unknown production control")
     for control in CONTROLS:
-        record = supplied.get(control, {"status": "NOT RUN"})
+        record = supplied.get(control, BASELINE.get(control, {"status": "NOT RUN"}))
         status = record["status"]
         if status not in STATUSES:
             raise ValueError(f"Unknown status for {control}")

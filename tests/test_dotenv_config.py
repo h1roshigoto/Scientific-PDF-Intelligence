@@ -166,12 +166,12 @@ def test_local_dotenv_is_ignored_and_untracked():
     if not (_PROJECT_ROOT / ".git").exists() or shutil.which("git") is None:
         pytest.skip("requires a Git checkout")
     ignored = subprocess.run(
-        ["git", "check-ignore", "--", ".env", ".env.local", ".env.production", ".env.example"],
+        ["git", "check-ignore", "--", ".env", ".env.local", ".env.production", ".env.example", ".env.production.example"],
         cwd=_PROJECT_ROOT, check=True, capture_output=True, text=True,
     )
     assert ignored.stdout.splitlines() == [".env", ".env.local", ".env.production"]
     tracked = subprocess.run(
-        ["git", "ls-files", "--", ".env", ".env.local", ".env.*", ":!.env.example"],
+        ["git", "ls-files", "--", ".env", ".env.local", ".env.*", ":!.env.example", ":!.env.production.example"],
         cwd=_PROJECT_ROOT, check=True, capture_output=True, text=True,
     )
     assert not tracked.stdout

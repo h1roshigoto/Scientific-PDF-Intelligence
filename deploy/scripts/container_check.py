@@ -8,7 +8,6 @@ import sys
 import tarfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from uuid import uuid4
 
 SERVICES = {"api": 10001, "worker": 10001, "sandbox": 10001, "proxy": 10002}
 ALLOWED_MOUNTS = {
@@ -133,15 +132,18 @@ assert throttled() > before
 """
     options = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true")
     docker("run", "--rm", *options, "--cpus", "0.25", image, "python", "-c", cpu)
-    name = "spi-limit-check-" + uuid4().hex[:10]
-    docker("create", "--name", name, *options, "--memory", "32m", "--memory-swap", "32m",
-           image, "python", "-c", "buffer=bytearray(160*1024**2)")
-    try:
-        result = subprocess.run(["docker", "start", "--attach", name], capture_output=True, timeout=20)
-        assert result.returncode == 137
-        assert docker("inspect", name, "--format", "{{.State.OOMKilled}}").strip() == "true"
-    finally:
-        docker("rm", "-f", name)
+    memory = """
+from pathlib import Path
+import subprocess
+import sys
+def kills():
+    values = dict(line.split() for line in Path('/sys/fs/cgroup/memory.events').read_text().splitlines())
+    return int(values['oom_kill'])
+before = kills()
+result = subprocess.run([sys.executable, '-c', 'buffer=bytearray(160*1024**2)'], timeout=15)
+assert result.returncode == -9 and kills() > before
+"""
+    docker("run", "--rm", *options, "--memory", "64m", "--memory-swap", "64m", image, "python", "-c", memory)
     print("PASS disposable CPU throttling and cgroup OOM enforcement")
 
 

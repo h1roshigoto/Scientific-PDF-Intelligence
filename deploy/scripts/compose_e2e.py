@@ -141,6 +141,7 @@ def export(client, path, target):
 
 
 def network_contract(client, origin):
+    private_query = token_urlsafe(24)
     for path in ("/documents", "/account", "/uploads/example", "/not-a-route"):
         response = status(client.get(path), 200)
         assert "text/html" in response.headers["content-type"]
@@ -152,7 +153,7 @@ def network_contract(client, origin):
     html = client.get("/documents").text
     asset = re.search(r'src="(/assets/[^"]+\.js)"', html)[1]
     assert "immutable" in status(client.get(asset), 200).headers["cache-control"]
-    assert status(client.get("/api/health", headers={
+    assert status(client.get("/api/health", params={"log_probe": private_query}, headers={
         "X-Forwarded-For": "192.0.2.1,192.0.2.2", "X-Forwarded-Proto": "http",
         "X-Forwarded-Host": "foreign.example", "Forwarded": "host=foreign.example;proto=http",
     }), 200).json() == {"status": "ok"}
@@ -165,6 +166,7 @@ def network_contract(client, origin):
                           "Access-Control-Request-Method": "POST"})
     assert "access-control-allow-origin" not in cors.headers
     print("PASS TLS trust chain, hostname, SPA assets, proxy overwrite, Host, CORS, CSRF and route isolation", flush=True)
+    return private_query
 
 
 def worker_recovery(compose, client, origin, path, owner, upload_id):
@@ -261,6 +263,8 @@ def interrupted_writes(compose, client, origin, source):
     assert status(client.get("/api/uploads"), 200).json() == before
     compose.run("run", "--rm", "--no-deps", "-e", "SPI_AUTH_SECRET_FILE=/local-secret/not-a-secret",
                 "api", expected=1)
+    compose.run("run", "--rm", "--no-deps", "-e", "SPI_AUTH_SECRET_FILE=", "-e", "SPI_AUTH_SECRET=invalid",
+                "api", expected=1)
     print("PASS API SIGKILL with partial multipart and open SQLite write, rollback, no upload and invalid secret refusal",
           flush=True)
 
@@ -306,6 +310,37 @@ def unavailable_storage(compose, client):
     print("PASS storage unavailable causes readiness failure and recovers after access is restored", flush=True)
 
 
+def interrupted_backup(compose):
+    program = """
+from pathlib import Path
+from time import sleep
+from spi.ops import backup
+
+copy = backup._copy_file
+
+def pause_after_copy(*args, **kwargs):
+    copy(*args, **kwargs)
+    Path('/tmp/backup-copy-interrupted').touch()
+    sleep(60)
+
+backup._copy_file = pause_after_copy
+backup.create('interrupted')
+"""
+    container = compose.run("run", "-d", "--rm", "--no-deps", "--entrypoint", "python", "backup", "-c", program)
+    try:
+        def copying():
+            return subprocess.run(
+                ["docker", "exec", container, "test", "-f", "/tmp/backup-copy-interrupted"],
+                capture_output=True, timeout=3,
+            ).returncode == 0
+
+        wait_for(copying, timeout=20)
+        subprocess.run(["docker", "kill", "-s", "SIGKILL", container], check=True, capture_output=True, timeout=10)
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, timeout=10)
+    compose.run("run", "--rm", "--no-deps", "backup", "verify", "interrupted", expected=1)
+
+
 def log_check(compose, forbidden):
     logs = compose.run("logs", "--no-color")
     assert all(secret and secret not in logs for secret in forbidden)
@@ -317,7 +352,7 @@ def scenario(primary, restored, directory, *, browser=False):
     alice, ca = primary.client(directory)
     bob, _ = primary.client(directory)
     with closing(alice), closing(bob):
-        network_contract(alice, primary.origin)
+        private_query = network_contract(alice, primary.origin)
         network_password = token_urlsafe(23)
         password_admin = token_urlsafe(23)
 
@@ -384,7 +419,8 @@ def scenario(primary, restored, directory, *, browser=False):
         assert status(alice.get(review + "/history"), 200).json() == history
         old_cookie = alice.cookies[cookie_name]
         generated_secret = primary.run("exec", "-T", "api", "cat", "/local-secret/auth")
-        log_check(primary, [invite_alice, invite_bob, network_password, password_admin, old_cookie, generated_secret])
+        log_check(primary, [invite_alice, invite_bob, network_password, password_admin,
+                            old_cookie, generated_secret, private_query])
         primary.run("run", "--rm", "--no-deps", "backup", "create", "must-refuse-active", expected=1)
         primary.run("stop", "proxy", "worker", "api")
         output = primary.run("run", "--rm", "--no-deps", "backup", "create", "rehearsal")
@@ -394,6 +430,7 @@ def scenario(primary, restored, directory, *, browser=False):
         assert {sha256(solar.read_bytes()).hexdigest(), sha256(rag.read_bytes()).hexdigest()} <= {
             row["sha256"] for row in manifest["files"].values()
         }
+        interrupted_backup(primary)
         primary.run("run", "--rm", "--no-deps", "backup", "verify", "rehearsal")
         # Copy into an intentionally incomplete artifact in the disposable backup volume.
         primary.run("run", "--rm", "--no-deps", "--entrypoint", "python", "backup", "-c",
@@ -419,7 +456,8 @@ def scenario(primary, restored, directory, *, browser=False):
             status(restored_bob.get(path_a + "/export/project.zip"), 404)
             status(restored_alice.get(path_b + "/results"), 404)
     print("PASS Alice/Bob, scientific results (4 Solar / 16 RAG), two SHA-256 originals, ZIP and review history", flush=True)
-    print("PASS active backup refusal, cold manifest, corrupt and conflicting restore refusal, separate verified Store", flush=True)
+    print("PASS active backup refusal, SIGKILL before backup publication, cold manifest, corrupt and conflicting restore refusal",
+          flush=True)
 
 
 def browser_check(directory, ca, origin, password, upload_route):
@@ -457,11 +495,15 @@ def main():
             blank = directory / "empty.env"
             blank.touch()
             environment = {key: value for key, value in os.environ.items() if not key.startswith("SPI_")}
+            environment.update({f"SPI_HOST_{key}": f"/tmp/spi-e2e/{key.lower()}"
+                                for key in ("DATASET", "BACKUPS", "PROXY_DATA", "AUTH_SECRET_FILE")})
             missing_tls = subprocess.run(
                 ["docker", "compose", "--env-file", str(blank), "-f", "compose.yaml", "-f", "compose.production.yaml",
                  "config", "--quiet"], cwd=ROOT, env=environment, capture_output=True, text=True,
             )
-            assert missing_tls.returncode and "SPI_PUBLIC_DOMAIN" in missing_tls.stderr
+            assert missing_tls.returncode and any(key in missing_tls.stderr for key in (
+                "SPI_PUBLIC_DOMAIN", "SPI_PUBLIC_ORIGIN", "SPI_AUTH_ALLOWED_ORIGINS",
+            ))
             scenario(primary, restored, directory, browser=args.browser)
     finally:
         # Project names and volumes are generated only for this test invocation.

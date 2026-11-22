@@ -20,6 +20,7 @@ def test_backup_member_rejects_noncanonical_paths(invalid):
 
 def test_public_gate_requires_every_control_and_public_environment():
     assert evaluate()["readiness"] == "NOT READY"
+    assert evaluate()["controls"]["security_scans"]["status"] == "BLOCKED"
     record = {"status": "PASS", "reference": "operator log", "checked_at": datetime.now(timezone.utc).isoformat()}
     evidence = {
         "environment": "public-production", "revision": "f" * 40,
