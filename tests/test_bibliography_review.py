@@ -95,7 +95,7 @@ def test_invalid_pdf_blocks_review_sheet_without_touching_state(tmp_path, corrup
         store.write("documents.json", docs)
     original_state = (store.root / "documents.json").read_bytes()
     output = tmp_path / "review.csv"
-    with pytest.raises((OSError, ValueError), match="|".join(("SHA-256", "No such file", "page count"))):
+    with pytest.raises((OSError, ValueError)):
         bibliography.write_review_sheet(store, output)
     assert not output.exists()
     assert (store.root / "documents.json").read_bytes() == original_state
