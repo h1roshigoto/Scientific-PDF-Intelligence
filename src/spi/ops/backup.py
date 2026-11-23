@@ -310,9 +310,11 @@ def main():
         if args.action == "verify":
             with TemporaryDirectory(prefix=".spi-verify-", dir=BACKUPS) as temporary:
                 report = read_archive(archive_path(name), Path(temporary))
+            snapshot("backup", {**last_snapshot("backup"), "last_verify_timestamp": time()})
         else:
             report = create(name)
-            snapshot("backup", {**last_snapshot("backup"), "last_success_timestamp": time(), "last_result": "passed"})
+            snapshot("backup", {**last_snapshot("backup"), "last_success_timestamp": time(),
+                                "last_size_bytes": archive_path(name).stat().st_size, "last_result": "passed"})
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     except (OSError, RuntimeError, ValueError, tarfile.TarError, sqlite3.Error, TypeError, KeyError, AttributeError) as exc:
         old = last_snapshot("backup")

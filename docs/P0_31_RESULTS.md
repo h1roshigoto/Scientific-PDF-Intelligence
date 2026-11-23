@@ -80,3 +80,7 @@ GigaChat в Compose выключен. Известные требования п
 Статусы контроля находятся в [Production readiness](PRODUCTION_READINESS.md).
 
 Источники версий [Python releases](https://www.python.org/doc/versions/), [Caddy releases](https://github.com/caddyserver/caddy/releases/tag/v2.11.9), [Trivy releases](https://github.com/aquasecurity/trivy/releases/tag/v0.76.2).
+
+Следующий этап воспроизвёл эти исходные сканы на merge commit PR №23.
+Новые сканы, OCI policy и эксплуатационные проверки описаны в
+[результатах P0 №32](P0_32_RESULTS.md) и [OCI triage](OCI_VULNERABILITY_TRIAGE.md).

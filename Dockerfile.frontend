@@ -12,8 +12,21 @@ COPY frontend_redezigned/public/assets ./public/assets
 ENV VITE_DATA_SOURCE=api VITE_API_BASE=/api
 RUN pnpm build && test -z "$(find dist -name '*.map' -print)"
 
-FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0 AS caddy
-RUN setcap -r /usr/bin/caddy
+FROM golang:1.26.10-alpine@sha256:87c65a688975c0b1d4585d204874c45ca78354670e3a5f11368c5a492303d696 AS caddy
+ADD --checksum=sha256:7b8de20699ec38a43c97d70dd5347ed8e19d3db96d0c9d76ded020f018cb6e5e \
+    https://codeload.github.com/caddyserver/caddy/tar.gz/0d98caea58f794f88e709b1bef2880996a471bca /tmp/caddy.tar.gz
+WORKDIR /src
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+COPY deploy/security/caddy-go-overrides.lock /tmp/go-overrides
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    tar -xzf /tmp/caddy.tar.gz --strip-components=1 && \
+    while read -r module version package_sum module_sum; do \
+        go mod edit "-require=${module}@${version}" && \
+        printf '%s %s %s\n%s %s/go.mod %s\n' "$module" "$version" "$package_sum" \
+            "$module" "$version" "$module_sum" >> go.sum || exit 1; \
+    done < /tmp/go-overrides && \
+    go build -mod=readonly -trimpath -buildvcs=false -ldflags '-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.9' \
+        -o /usr/bin/caddy ./cmd/caddy && go mod verify
 
 FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 COPY --from=caddy /usr/bin/caddy /usr/bin/caddy

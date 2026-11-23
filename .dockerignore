@@ -7,6 +7,8 @@
 !src/spi/**/*.py
 !deploy/
 !deploy/requirements.lock
+!deploy/security/
+!deploy/security/caddy-go-overrides.lock
 !deploy/Caddyfile
 !deploy/Caddyfile.local
 !deploy/Caddyfile.production

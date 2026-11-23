@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "platform": "linux/amd64",
+  "backup_schema": 1,
+  "minimum_linux": "Linux 6.2 with Landlock ABI >= 3, seccomp and cgroup v2",
+  "required_host_controls": [
+    "DNS and public TLS", "firewall and private networks", "dataset and Docker storage limits",
+    "non-root runtime", "alert delivery", "independent encrypted restore", "public Alice/Bob E2E"
+  ],
+  "known_limitations": ["Local and CI evidence alone cannot authorize public launch", "No registry signature is produced"],
+  "build_inputs": {
+    "runtime": ["Dockerfile.api", "deploy/requirements.lock"],
+    "proxy": ["Dockerfile.frontend", "frontend_redezigned/pnpm-lock.yaml"]
+  }
+}

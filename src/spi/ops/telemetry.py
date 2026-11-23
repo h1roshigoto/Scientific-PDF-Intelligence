@@ -55,6 +55,7 @@ class SafeFormatter(logging.Formatter):
 class RequestMetrics:
     def __init__(self, app):
         self.app = app
+        self.instance = uuid4().hex
         self.totals = Counter()
         self.last_write = 0.0
 
@@ -84,6 +85,8 @@ class RequestMetrics:
                 self.totals[f"http_{status // 100}xx"] += 1
                 if path.startswith("/auth/") and status in (401, 403):
                     self.totals["authentication_failures"] += 1
+                    if path == "/auth/login":
+                        self.totals["login_failures"] += 1
                 if status == 429:
                     self.totals["rate_limit_hits"] += 1
                 if path == "/uploads" and scope["method"] == "POST":
@@ -93,7 +96,7 @@ class RequestMetrics:
             elif interrupted and "/export/" in path:
                 self.totals["export_failures"] += 1
             if monotonic() - self.last_write >= 1:
-                snapshot("api", {"sample_time": time(), **self.totals})
+                snapshot("api", {"sample_time": time(), "instance": self.instance, **self.totals})
                 self.last_write = monotonic()
             event("api", "response_interrupted" if interrupted else "request",
                   request_id=request_id, status=status, duration_ms=elapsed)

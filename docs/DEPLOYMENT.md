@@ -7,7 +7,7 @@ monitoring работают без сети. Порты публикует то�
 
 ## Linux
 
-Используйте Linux x86-64 или arm64 с cgroup v2, seccomp и Landlock ABI 3+
+Для релиза P0 №32 используйте Linux x86-64 с cgroup v2, seccomp и Landlock ABI 3+
 (ядро 6.2+ с включённым Landlock), Docker Engine 28+ и Compose 2.36+.
 Проверяйте фактические настройки на целевом хосте. SQLite, backup staging и
 восстановление требуют локальную файловую систему с POSIX-locking и атомарным
@@ -33,6 +33,8 @@ sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.production.example /srv/sp
 ```
 
 Замените `spi.example.org` своим доменом во всех трёх параметрах env-файла.
+Внесите значения `SPI_*_REPOSITORY` и платформенные `SPI_*_DIGEST`
+из [подтверждённого релиза](RELEASE_CHECKLIST.md).
 Назначьте DNS A и при наличии рабочего IPv6 AAAA. Разрешите входящие TCP 80
 и 443 к Caddy через firewall и NAT. Прокси должен иметь доступ к DNS и ACME.
 Проверьте совпадение публичных адресов, исключите пересечение сетей Compose
@@ -41,8 +43,8 @@ sudo install -m 0600 -o "$(id -u)" -g "$(id -g)" .env.production.example /srv/sp
 ```bash
 spi=(docker compose --env-file /srv/spi/compose.env -f compose.yaml -f compose.production.yaml)
 "${spi[@]}" config --quiet
-"${spi[@]}" build
-"${spi[@]}" up -d --wait
+"${spi[@]}" pull
+"${spi[@]}" up --no-build -d --wait
 "${spi[@]}" ps
 "${spi[@]}" logs --tail 40 api worker proxy monitoring
 "${spi[@]}" exec api python -m spi.auth_cli bootstrap-admin --email operator@example.org --display-name Operator
@@ -72,10 +74,11 @@ spi=(docker compose --env-file /srv/spi/compose.env -f compose.yaml -f compose.p
 | `SPI_AUTH_DB`, `SPI_MULTIUSER_STORAGE_ROOT` | Фиксированные пути в контейнере `/state-auth/auth.sqlite3` и `/state-tenants` |
 | `SPI_GLOBAL_MAX_ACTIVE_JOBS`, `SPI_USER_MAX_ACTIVE_JOBS`, `SPI_USER_MAX_QUEUED_JOBS` | `2`, `1`, `4` |
 | `SPI_USER_MAX_UPLOAD_FILES`, `SPI_USER_MAX_TOTAL_STORAGE_BYTES`, `SPI_USER_MAX_PDF_BYTES` | `100`, `524288000`, `26214400`. Параметр оригиналов называется `SPI_USER_MAX_TOTAL_STORAGE_BYTES` |
-| `SPI_PROXY_UPLOAD_BYTES` | `26345472`, совпадает с лимитом PDF плюс 64 KiB multipart |
+| `SPI_PROXY_UPLOAD_BYTES` | `26345472`, 25 MiB PDF плюс 128 KiB резерва Caddy. FastAPI применяет свой лимит multipart |
 | `SPI_DISK_MIN_FREE_BYTES`, `SPI_WORKER_JOB_TIMEOUT` | `134217728`, Compose фиксирует 240 секунд на задачу |
 | `SPI_UPLOAD_PROCESS_GIGACHAT` | Compose фиксирует `false`. Для standalone private mode см. [GIGACHAT_SMOKE.md](GIGACHAT_SMOKE.md) |
-| `SPI_IMAGE_TAG` | `local` для теста. Для обновлений используйте отдельный тег релиза и сохраняйте digest |
+| `SPI_RUNTIME_REPOSITORY`, `SPI_RUNTIME_DIGEST` | Registry repository и платформенный OCI digest runtime |
+| `SPI_PROXY_REPOSITORY`, `SPI_PROXY_DIGEST` | Registry repository и платформенный OCI digest proxy |
 
 Конфигурация запуска отклоняет отсутствующий или небезопасный секрет, неверный
 origin, несколько или неединичный IP прокси и превышение лимита sandbox.
@@ -91,7 +94,8 @@ Compose передаёт frontend только `VITE_DATA_SOURCE=api` и `VITE_A
 ```bash
 python deploy/scripts/production_smoke.py https://spi.example.org --authorized
 python deploy/scripts/container_check.py --project scientific-pdf-intelligence --profile production --env-file /srv/spi/compose.env --layers
-python -m spi.ops.production_check --evidence /path/to/production-evidence.json --json
+python -m spi.ops.production_check --evidence /path/to/production-evidence.json \
+  --expected-deployment /path/to/deployment-identity.json --scans /path/to/artifacts --json
 ```
 
 1. С внешней машины проверьте DNS, цепочку сертификата и hostname, HTTP →

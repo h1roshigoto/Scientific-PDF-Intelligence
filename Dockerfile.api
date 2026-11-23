@@ -9,7 +9,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM ${PYTHON_IMAGE}
 RUN sed -i 's@http://@https://@g' /etc/apt/sources.list.d/debian.sources && \
     apt-get -o Acquire::Retries=2 update && \
-    apt-get install -y --no-install-recommends 'zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1' && \
+    apt-get install -y --no-install-recommends \
+        'zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1' \
+        'base-files=13.8+deb13u8' 'libc6=2.41-12+deb13u5' 'libc-bin=2.41-12+deb13u5' \
+        'libssl3t64=3.5.9-1~deb13u1' 'openssl=3.5.9-1~deb13u1' 'openssl-provider-legacy=3.5.9-1~deb13u1' && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -g 10001 spi && useradd -u 10001 -g 10001 -M spi && \
     install -d -m 0700 -o spi -g spi /dataset /local-secret /parser /metrics /backups && \

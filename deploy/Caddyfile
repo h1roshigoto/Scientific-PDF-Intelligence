@@ -14,9 +14,13 @@
 	}
 	handle_path /api/* {
 		header >Cache-Control no-store
-		@upload path /uploads
+		@upload path /uploads /uploads/
 		request_body @upload {
 			max_size {$SPI_PROXY_UPLOAD_BYTES:26345472}
+		}
+		@ordinary not path /uploads /uploads/
+		request_body @ordinary {
+			max_size 65536
 		}
 		reverse_proxy api:8000 {
 			header_up X-Forwarded-For {remote_host}

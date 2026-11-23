@@ -1,6 +1,7 @@
 """Serial, networkless PDF service. Only the request document reaches MuPDF."""
 
 import argparse
+import codecs
 import ctypes
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 
 from spi import pdf_boundary
 
@@ -17,8 +19,8 @@ SOCKET = Path("/parser/pdf.sock")
 CHILD_TIMEOUT = 20
 
 
-def restrict_child():
-    """Allow reads and inherited file descriptors under seccomp and Landlock."""
+def restrict_child(document=None):
+    """Permit reading the staged document and using inherited descriptors."""
     import resource
 
     resource.setrlimit(resource.RLIMIT_CPU, (15, 15))
@@ -31,11 +33,23 @@ def restrict_child():
     # Landlock ABI 3 handles truncation as well as filesystem creation and writes.
     if libc.syscall(444, 0, 0, 1) < 3:
         raise RuntimeError("landlock_abi_unavailable")
-    write_access = ctypes.c_uint64(((1 << 15) - 1) & ~((1 << 0) | (1 << 2) | (1 << 3)))
-    fd = libc.syscall(444, ctypes.byref(write_access), ctypes.sizeof(write_access), 0)
+    access = ctypes.c_uint64((1 << 15) - 1)
+    fd = libc.syscall(444, ctypes.byref(access), ctypes.sizeof(access), 0)
     if fd < 0:
         raise RuntimeError("landlock_create")
     try:
+        if document is not None:
+            class PathRule(ctypes.Structure):
+                _pack_ = 1
+                _fields_ = [("access", ctypes.c_uint64), ("parent", ctypes.c_int32)]
+
+            document_fd = os.open(document, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+            try:
+                rule = PathRule(1 << 2, document_fd)  # LANDLOCK_ACCESS_FS_READ_FILE
+                if libc.syscall(445, fd, 1, ctypes.byref(rule), 0):
+                    raise RuntimeError("landlock_document_rule")
+            finally:
+                os.close(document_fd)
         if libc.prctl(38, 1, 0, 0, 0) or libc.syscall(446, fd, 0):
             raise RuntimeError("landlock_restrict")
     finally:
@@ -53,7 +67,7 @@ def restrict_child():
     try:
         allowed = """
             read write readv writev close lseek pread64 fstat newfstatat stat statx lstat
-            open openat readlink readlinkat faccessat faccessat2 access getdents64 fcntl ioctl
+            open openat readlink readlinkat faccessat faccessat2 access getdents64 fcntl
             mmap mprotect munmap mremap brk madvise futex set_robust_list rseq arch_prctl
             rt_sigaction rt_sigprocmask rt_sigreturn sigaltstack
             getpid gettid getuid geteuid getgid getegid getcwd uname sched_getaffinity
@@ -74,7 +88,9 @@ def parse(operation, value, path):
 
     from spi.pdf_layout import read_layout
 
-    restrict_child()
+    # MuPDF lazily resolves this Python codec when decoding page text.
+    codecs.lookup("raw_unicode_escape")
+    restrict_child(path if operation != "ping" else None)
     if operation == "ping":
         return {"status": "ok"}
     try:
@@ -96,22 +112,19 @@ def parse(operation, value, path):
         return {"status": "invalid"}
 
 
-class _Request(socketserver.StreamRequestHandler):
+class _Request(socketserver.BaseRequestHandler):
     def handle(self):
-        self.request.settimeout(5)
         try:
-            arguments = json.loads(pdf_boundary.receive(self.rfile, 256))
-            content = pdf_boundary.receive(self.rfile, pdf_boundary.MAX_PDF_BYTES)
-            operation = arguments["op"]
-            value = ""
-            if operation == "layout" and arguments.get("domain") in {"solar", "rag"}:
-                value = arguments["domain"]
-            elif operation == "evidence" and type(arguments.get("page")) is int:
-                value = str(arguments["page"])
-            elif operation not in {"pages", "ping"}:
-                raise ValueError("invalid parser operation")
-            if operation == "ping" and content:
+            deadline = monotonic() + 5
+            arguments = pdf_boundary.REQUEST.validate_python(pdf_boundary.decode_json(
+                pdf_boundary.receive(self.request, pdf_boundary.MAX_ARGUMENT_BYTES, deadline)
+            ))
+            operation = arguments.op
+            content_limit = 0 if operation == "ping" else pdf_boundary.MAX_PDF_BYTES
+            content = pdf_boundary.receive(self.request, content_limit, deadline)
+            if operation != "ping" and not content:
                 raise ValueError("unexpected parser input")
+            value = str(getattr(arguments, "page", getattr(arguments, "domain", "")))
             with TemporaryDirectory() as temporary:
                 path = Path(temporary) / "document.pdf"
                 path.write_bytes(content)
@@ -129,7 +142,7 @@ class _Request(socketserver.StreamRequestHandler):
         except (OSError, ValueError, KeyError, TypeError, RecursionError, subprocess.SubprocessError):
             result = b'{"status":"unavailable"}'
         try:
-            pdf_boundary.send(self.request, result)
+            pdf_boundary.send(self.request, result, monotonic() + 5)
         except OSError:
             pass
 

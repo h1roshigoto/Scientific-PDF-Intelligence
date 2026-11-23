@@ -89,6 +89,8 @@ jobs:
         working-directory: frontend_redezigned
       - run: pnpm test:e2e multiuser.spec.ts real-upload.spec.ts
         working-directory: frontend_redezigned
+        env:
+          PLAYWRIGHT_CHANNEL: msedge
       - uses: actions/upload-artifact@v4
         if: always()
         with:

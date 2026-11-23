@@ -79,13 +79,29 @@ The sandbox container has no IP network, auth DB, tenant Store, model
 credentials, or Docker socket. It receives document bytes and a bounded
 operation through one Unix socket. It serializes requests, places one input
 document in tmpfs, and starts a fresh parser child. Each child has a
-seccomp syscall allowlist, Landlock restrictions on filesystem writes,
+seccomp syscall allowlist and Landlock ABI 3. It can read the staged document
+and write to its inherited result descriptor. The policy denies opening other
+files for data reads, filesystem writes, new sockets, fork and exec. It enforces
 15 seconds CPU, 20 seconds wall time, 384 MiB address space and a
 16 MiB output limit. The container additionally caps RAM and PIDs. The
 parent discards the parser diagnostic streams. The caller independently
 validates reply types, page indices and evidence. The parser child policy
 is required at startup, including on Linux environments running Docker
 Desktop. The worker deadline is 240 seconds.
+
+The socket accepts only ping, page count, page evidence and Solar/RAG layout.
+Strict argument and response schemas, frame bounds and monotonic deadlines
+apply. Production calls fail closed when the socket is unavailable. The
+parent derives temporary locations internally and never receives a tenant path.
+
+Direct PyMuPDF call inventory for this deployment:
+
+| Module | Scope |
+| --- | --- |
+| `spi.ops.pdf_sandbox`, `spi.pdf_layout`, `spi.pdf`, `spi.batch_pdf` | Original-file parsing in the constrained child. Local layout and import entry points are also available to standalone CLI. |
+| `spi.upload_store`, `spi.upload_reviews` | Direct original-file methods for standalone installations. Compose and production select the boundary. |
+| `spi.project_passport`, `spi.upload_export_passport` | New blank documents populated from structured data. |
+| `spi.build_scope_sheet`, `spi.review_scope`, `spi.gigachat_evidence`, `spi.gigachat_pipeline` | Operator CLI or GigaChat paths. Compose startup rejects upload GigaChat. |
 
 The operator and kernel remain trusted. The parser uses a shared process
 service and its OS limits also bound document size, page count and throughput.

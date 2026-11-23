@@ -12,22 +12,42 @@ x-secret: &secret
   read_only: true
   bind: {create_host_path: false}
 
+x-release-runtime: &release-runtime
+  image: ${SPI_RUNTIME_REPOSITORY:?Set SPI_RUNTIME_REPOSITORY}@${SPI_RUNTIME_DIGEST:?Set SPI_RUNTIME_DIGEST}
+  pull_policy: missing
+
 services:
+  initialize:
+    <<: *release-runtime
   api:
+    <<: *release-runtime
+    build: !reset null
     environment: *production-env
     volumes:
       - *secret
   worker:
+    <<: *release-runtime
     environment: *production-env
     volumes:
       - *secret
   proxy:
+    build: !reset null
+    image: ${SPI_PROXY_REPOSITORY:?Set SPI_PROXY_REPOSITORY}@${SPI_PROXY_DIGEST:?Set SPI_PROXY_DIGEST}
+    pull_policy: missing
     command: [caddy, run, --config, /etc/caddy/Caddyfile.production, --adapter, caddyfile]
     environment:
       SPI_SITE: ${SPI_PUBLIC_DOMAIN:?Set SPI_PUBLIC_DOMAIN}
     ports:
       - "80:80"
       - "443:443"
+  sandbox:
+    <<: *release-runtime
+  monitoring:
+    <<: *release-runtime
+  backup:
+    <<: *release-runtime
+  restore:
+    <<: *release-runtime
 volumes:
   dataset:
     driver: local

@@ -14,7 +14,7 @@ Box = tuple[FiniteFloat, FiniteFloat, FiniteFloat, FiniteFloat]
 
 
 class _LayoutModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
 
 class _Block(_LayoutModel):
@@ -60,16 +60,24 @@ def read_layout(path, domain, content=None):
     return metadata, pages, fragments, issues
 
 
-def remote_layout(path, domain, content):
-    result = pdf_boundary.request("layout", content, domain=domain)
-    if result["status"] == "invalid":
-        raise ValueError("pdf_parser_invalid_document")
-    layout = _Layout.model_validate(result)
+def validate_layout(result):
+    # JSON mode preserves the tuple types used by the scientific layout model.
+    import json
+
+    layout = _Layout.model_validate_json(json.dumps(result, allow_nan=False))
     count = len(layout.pages)
     if ([page.page for page in layout.pages] != list(range(1, count + 1))
             or any(not 1 <= fragment.page <= count for fragment in layout.fragments)
             or any(issue.page > count for issue in layout.issues)):
         raise ValueError("pdf_parser_invalid_layout")
+    return layout
+
+
+def remote_layout(path, domain, content):
+    layout = pdf_boundary.request("layout", content, domain=domain, validate=validate_layout)
+    if isinstance(layout, dict):
+        raise ValueError("pdf_parser_invalid_document")
+    count = len(layout.pages)
     pages = [page.model_dump(mode="json", exclude_none=True) for page in layout.pages]
     issues = [issue.model_dump() for issue in layout.issues]
     metadata = {

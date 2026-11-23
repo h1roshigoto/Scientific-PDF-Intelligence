@@ -9,6 +9,8 @@ import httpx
 
 
 def main():
+    if not __debug__:
+        raise RuntimeError("Smoke-check assertions must be enabled")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("origin", help="Exact production HTTPS origin")
     parser.add_argument("--authorized", action="store_true", help="Confirm permitted access to the supplied domain")
@@ -29,6 +31,7 @@ def main():
         assert html.headers["cache-control"] == "no-store"
         assert client.get("/api/health", headers={
             "X-Forwarded-For": "192.0.2.1, 192.0.2.2", "X-Forwarded-Proto": "http",
+            "X-Forwarded-Host": "invalid.example", "Forwarded": "host=invalid.example;proto=http",
         }).json() == {"status": "ok"}
         assert client.get("/api/health", headers={"Host": "invalid.example"}).status_code in (400, 404, 421)
         csrf = client.get("/api/auth/csrf")
@@ -36,6 +39,10 @@ def main():
         assert {"secure", "httponly", "path=/", "samesite=lax"} <= {
             part.strip().lower() for part in csrf.headers["set-cookie"].split(";")[1:]}
         assert client.post("/api/auth/logout", headers={"Origin": args.origin}).status_code == 403
+        assert client.post("/api/auth/logout", headers={
+            "Origin": "https://invalid.example", "X-SPI-CSRF": csrf.json()["csrf_token"],
+        }).status_code == 403
+        assert client.get("/api/auth/me", headers={"Cookie": "__Host-spi-session=invalid-base64!!!"}).status_code == 401
         for path in ("documents", "results", "issues", "export/results.json", "__ops/ready"):
             assert client.get("/api/" + path).status_code == 404
     print("PASS public edge DNS, TLS chain and hostname, redirect, HSTS, proxy, CSRF, cookie and route checks")

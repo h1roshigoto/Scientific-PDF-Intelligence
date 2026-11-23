@@ -27,6 +27,8 @@ STATE = DATASET / "state"
 
 
 def initialize():
+    if not os.access(METRICS, os.R_OK | os.W_OK | os.X_OK):
+        raise OSError("metrics_storage_unavailable")
     private_path(DATASET, Path("coord"), directory=True).mkdir(mode=0o700, exist_ok=True)
     with cold_lock(DATASET / "coord", exclusive=False, create=True):
         for relative in ("state/auth", "state/tenants"):
@@ -61,7 +63,7 @@ def validate_deployment(config):
         raise ValueError("invalid_deployment_profile")
     if (config.origins != (origin,) or config.development or not config.secure
             or len(config.trusted_proxies) != 1 or config.trusted_proxies[0].version != 4
-            or not pdf_boundary.enabled() or not os.getenv("SPI_AUTH_SECRET_FILE")
+            or os.getenv("SPI_PDF_SOCKET") != "/parser/pdf.sock" or not os.getenv("SPI_AUTH_SECRET_FILE")
             or config.quotas.max_pdf_bytes > pdf_boundary.MAX_PDF_BYTES
             or flag("SPI_UPLOAD_PROCESS_GIGACHAT")):
         raise ValueError("invalid_deployment_security_config")
@@ -127,7 +129,7 @@ def probe_worker(worker):
 def queue_metrics(root):
     now = time()
     totals = {"queue_depth": 0, "oldest_queued_job_age_seconds": 0, "processing_failures": 0,
-              "worker_recoveries": 0, "model_requests": 0, "processing": 0}
+              "worker_recoveries": 0, "model_requests": 0, "processing": 0, "oldest_processing_age_seconds": 0}
     users = private_path(root, Path("users"), directory=True)
     if not users.is_dir():
         return totals
@@ -150,6 +152,8 @@ def queue_metrics(root):
                     totals["processing_failures"] += count
                 elif status == "processing":
                     totals["processing"] += count
+                    age = now - datetime.fromisoformat(oldest).astimezone(timezone.utc).timestamp()
+                    totals["oldest_processing_age_seconds"] = max(totals["oldest_processing_age_seconds"], int(age))
     return totals
 
 
@@ -164,14 +168,30 @@ def collect_storage(config):
 
 
 def monitoring():
-    while True:
-        active = [worker["state"] for path in METRICS.glob("worker-*.json")
-                  if probe_worker(worker := last_snapshot(path.stem))]
-        event("monitoring", "sample", active_workers=len(active),
-              worker_state="processing" if "processing" in active else "idle" if active else "stalled",
-              queue=last_snapshot("queue"), api=last_snapshot("api"),
-              backup=last_snapshot("backup"), restore=last_snapshot("restore"))
-        sleep(15)
+    from .alerts import monitor
+
+    def active():
+        return [worker["state"] for path in METRICS.glob("worker-*.json")
+                if probe_worker(worker := last_snapshot(path.stem))]
+
+    monitor(sleep, active)
+
+
+def probe_api():
+    health = last_snapshot("health")
+    try:
+        with urlopen("http://127.0.0.1:8000/__ops/ready", timeout=2) as response:
+            if response.status != 200:
+                raise ValueError("api_unavailable")
+        health["last_api_ok"] = time()
+        try:
+            pdf_boundary.request("ping", timeout=1)
+        except pdf_boundary.ParserUnavailable:
+            pass
+        else:
+            health["last_sandbox_ok"] = time()
+    finally:
+        snapshot("health", health)
 
 
 def main():
@@ -185,9 +205,7 @@ def main():
         elif args.action == "serve":
             serve(args.command)
         elif args.action == "api-health":
-            with urlopen("http://127.0.0.1:8000/__ops/ready", timeout=3) as response:
-                if response.status != 200:
-                    raise ValueError("api_unavailable")
+            probe_api()
         elif args.action == "worker-health":
             queue = last_snapshot("queue")
             if not probe_worker(last_snapshot(worker_metric_name())) or not queue.get("queue_available"):
